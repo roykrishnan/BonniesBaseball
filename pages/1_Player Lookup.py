@@ -59,17 +59,29 @@ st.markdown("""
         font-weight: bold !important;
     }
     .stMetric > div {
-        background-color: #ffffff;
-        border: 1px solid #54342c;
-        border-radius: 6px;
-        padding: 0.5rem;
+    background-color: #ffffff !important;
+    border: 1px solid #54342c !important;
+    border-radius: 6px !important;
+    padding: 0.5rem !important;
+}
+    .stMetric [data-testid="metric-container"] {
+        background-color: #ffffff !important;
+        border: 1px solid #54342c !important;
+        border-radius: 6px !important;
+        padding: 0.5rem !important;
     }
-    .stMetric .metric-label {
-        color: #54342c;
+    .stMetric [data-testid="metric-container"] > div {
+        color: #54342c !important;
     }
-    .stMetric .metric-value {
-        color: #54342c;
-        font-weight: bold;
+    .stMetric .metric-label,
+    .stMetric [data-testid="metric-container"] label {
+        color: #54342c !important;
+        font-weight: bold !important;
+    }
+    .stMetric .metric-value,
+    .stMetric [data-testid="metric-container"] [data-testid="metric-value"] {
+        color: #54342c !important;
+        font-weight: bold !important;
     }
 </style>
 """, unsafe_allow_html=True)
