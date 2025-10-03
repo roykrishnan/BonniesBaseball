@@ -130,6 +130,22 @@ st.markdown("""
         color: #54342c !important;
         font-weight: bold !important;
     }
+    
+    /* Force all metric text to be brown */
+    .stMetric * {
+        color: #54342c !important;
+    }
+    
+    .stMetric div,
+    .stMetric span,
+    .stMetric p,
+    .stMetric label {
+        color: #54342c !important;
+    }
+    
+    [data-testid="metric-container"] * {
+        color: #54342c !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
