@@ -30,22 +30,36 @@ st.markdown("""
         margin-bottom: 2rem;
         opacity: 0.8;
     }
-    .player-header {
-        text-align: center;
-        color: white;
-        font-size: 2rem;
-        font-weight: bold;
-        margin-bottom: 1rem;
-        border-bottom: 3px solid #54342c;
-        padding-bottom: 0.5rem;
-    }
-    .section-header {
+    .leaderboard-title {
         color: #54342c;
-        font-size: 1.5rem;
+        font-size: 1.8rem;
         font-weight: bold;
         margin-bottom: 1rem;
         border-bottom: 2px solid #54342c;
         padding-bottom: 0.5rem;
+    }
+    .metric-card {
+        background: linear-gradient(135deg, #ffffff 0%, #f9f9f9 100%);
+        padding: 1rem;
+        border-radius: 8px;
+        border-left: 4px solid #54342c;
+        margin-bottom: 1rem;
+        box-shadow: 0 2px 4px rgba(84, 52, 44, 0.1);
+    }
+    .rank-1 {
+        background: linear-gradient(135deg, #FFD700 0%, #FFA500 100%);
+        color: #54342c;
+        font-weight: bold;
+    }
+    .rank-2 {
+        background: linear-gradient(135deg, #C0C0C0 0%, #A9A9A9 100%);
+        color: #54342c;
+        font-weight: bold;
+    }
+    .rank-3 {
+        background: linear-gradient(135deg, #CD7F32 0%, #B8860B 100%);
+        color: white;
+        font-weight: bold;
     }
     .stSelectbox > div > div {
         background-color: #54342c !important;
@@ -54,18 +68,44 @@ st.markdown("""
     .stSelectbox > div > div > div {
         color: white !important;
     }
-    .stSelectbox label {
+    .stSelectbox > div > div > div > div {
         color: white !important;
-        font-weight: bold !important;
+    }
+    .stSelectbox span {
+        color: white !important;
+    }
+    .stSelectbox div[data-baseweb="select"] {
+        color: white !important;
+    }
+    .stSelectbox div[data-baseweb="select"] span {
+        color: white !important;
+    }
+            
+    .stSelectbox label {
+    color: white !important;
+    font-weight: bold !important;}
+            
+    .stTab [data-baseweb="tab-list"] {
+        gap: 2px;
+    }
+    .stTab [data-baseweb="tab"] {
+        background-color: #ffffff;
+        color: #54342c;
+        border: 1px solid #54342c;
+        border-radius: 4px 4px 0 0;
+    }
+    .stTab [data-baseweb="tab"][aria-selected="true"] {
+        background-color: #54342c;
+        color: #ffffff;
     }
     .stMetric > div {
-    background-color: #ffffff !important;
-    border: 1px solid #54342c !important;
-    border-radius: 6px !important;
-    padding: 0.5rem !important;
-}
+        background-color: #f8f9fa !important;
+        border: 1px solid #54342c !important;
+        border-radius: 6px !important;
+        padding: 0.5rem !important;
+    }
     .stMetric [data-testid="metric-container"] {
-        background-color: #ffffff !important;
+        background-color: #f8f9fa !important;
         border: 1px solid #54342c !important;
         border-radius: 6px !important;
         padding: 0.5rem !important;
@@ -82,6 +122,22 @@ st.markdown("""
     .stMetric [data-testid="metric-container"] [data-testid="metric-value"] {
         color: #54342c !important;
         font-weight: bold !important;
+    }
+    
+    /* Force all metric text to be brown */
+    .stMetric * {
+        color: #54342c !important;
+    }
+    
+    .stMetric div,
+    .stMetric span,
+    .stMetric p,
+    .stMetric label {
+        color: #54342c !important;
+    }
+    
+    [data-testid="metric-container"] * {
+        color: #54342c !important;
     }
 </style>
 """, unsafe_allow_html=True)
