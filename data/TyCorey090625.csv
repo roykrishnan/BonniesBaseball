@@ -1,0 +1,17 @@
+Player ID:,14,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+Player Name:,Ty Corey,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+No,Date,Pitch ID,Pitch Type,Is Strike,Strike Zone Side,Strike Zone Height,Velocity,Total Spin,True Spin (release),Spin Efficiency (release),Spin Direction,Spin Confidence,VB (trajectory),HB (trajectory),SSW VB,SSW HB,VB (spin),HB (spin),Horizontal Angle,Release Angle,Release Height,Release Side,Gyro Degree (deg),Unique ID,Device Serial Number,SO - latLongConfidence,SO - latitude,SO - longitude,SO - rotMatConfidence,SO - timestamp,SO - Xx,SO - Xy,SO - Xz,SO - Yx,SO - Yy,SO - Yz,SO - Zx,SO - Zy,SO - Zz,Horizontal Approach Angle,Vertical Approach Angle,Session Name,Intent Type,Release Extension (ft)
+1,Sat Sep 06 2025 9:29:57 PM,1757194197,Fastball,N,-10.6,32.92,78.86,1593.69,1593.5,99.99,11:10,1,14.7,-7.6,-,-,-,-,-2.57,-0.47,5.68,-2.61,0.83,-,MTD-22117O95312,,,,,,,,,,,,,,,-,-,untitled,high_intent,74
+2,Sat Sep 06 2025 9:29:45 PM,1757194185,Slider,N,18.98,3.23,66.19,2027.62,2021.8,99.71,0:34,1,12.5,6.4,-,-,-,-,-4.14,-1.68,5.63,-2.75,-4.34,-,MTD-22117O95312,,,,,,,,,,,,,,,-,-,untitled,high_intent,85
+3,Sat Sep 06 2025 9:28:33 PM,1757194113,Fastball,N,7.64,12.75,74.28,1644.28,1487,90.43,10:18,1,13.8,-12.7,-,-,-,-,-4.79,-1.85,5.54,-2.71,25.27,-,MTD-22117O95312,,,,,,,,,,,,,,,-,-,untitled,high_intent,81
+4,Sat Sep 06 2025 9:28:19 PM,1757194099,Fastball,Y,-6.51,38.56,79.34,1732.92,1732.2,99.96,10:54,1,18.1,-5.4,-,-,-,-,-2.65,-0.71,5.73,-2.47,1.61,-,MTD-22117O95312,,,,,,,,,,,,,,,-,-,untitled,high_intent,81
+5,Sat Sep 06 2025 9:28:06 PM,1757194086,Fastball,N,12.49,18.11,78.53,1686.67,1625.9,96.4,10:56,1,17.2,-11.2,-,-,-,-,-5.1,-2.62,5.79,-2.59,-15.43,-,MTD-22117O95312,,,,,,,,,,,,,,,-,-,untitled,high_intent,-
+6,Sat Sep 06 2025 9:27:38 PM,1757194058,-,N,-,-,69.3,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,MTD-22117O95312,,,,,,,,,,,,,,,-,-,untitled,high_intent,-
+7,Sat Sep 06 2025 9:27:25 PM,1757194045,-,N,-,-,68.22,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,MTD-22117O95312,,,,,,,,,,,,,,,-,-,untitled,high_intent,-
+8,Sat Sep 06 2025 9:27:12 PM,1757194032,Slider,Y,3.35,41.13,73.89,1657.21,1518.3,91.62,10:20,1,15.2,-9.8,-,-,-,-,-4.25,1.02,5.41,-2.83,23.63,-,MTD-22117O95312,,,,,,,,,,,,,,,-,-,untitled,high_intent,-
+9,Sat Sep 06 2025 9:26:49 PM,1757194009,Slider,N,16.81,7.92,74.32,1627.34,1516.3,93.18,10:12,1,24.1,-11.4,-,-,-,-,-5.5,-3.1,5.63,-2.89,21.29,-,MTD-22117O95312,,,,,,,,,,,,,,,-,-,untitled,high_intent,-
+10,Sat Sep 06 2025 9:26:35 PM,1757193995,Fastball,N,-20.16,44.35,78.88,1786.82,1785.7,99.94,11:08,1,18,-9.5,-,-,-,-,-1.94,-0.04,5.73,-2.64,2.06,-,MTD-22117O95312,,,,,,,,,,,,,,,-,-,untitled,high_intent,-
+11,Sat Sep 06 2025 9:26:21 PM,1757193981,Fastball,N,-19.89,34.3,77.9,1711.73,1709.1,99.85,11:08,1,15.6,-8.1,-,-,-,-,-1.81,-0.67,5.67,-2.59,3.19,-,MTD-22117O95312,,,,,,,,,,,,,,,-,-,untitled,high_intent,-
+12,Sat Sep 06 2025 9:26:08 PM,1757193968,Fastball,N,15.73,39.68,78.69,1645.73,1625.3,98.76,10:50,1,13.3,-10.2,-,-,-,-,-5.28,0.39,5.59,-2.67,-9.04,-,MTD-22117O95312,,,,,,,,,,,,,,,-,-,untitled,high_intent,-
+13,Sat Sep 06 2025 9:25:54 PM,1757193954,Fastball,N,-7.59,48.93,77.5,1591.62,1574.8,98.94,11:00,1,11.4,-8.9,-,-,-,-,-3.15,1.29,5.65,-2.82,8.34,-,MTD-22117O95312,,,,,,,,,,,,,,,-,-,untitled,high_intent,-

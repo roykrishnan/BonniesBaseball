@@ -1,0 +1,18 @@
+Player ID:,10,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+Player Name:,Jaxson Ross,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+No,Date,Pitch ID,Pitch Type,Is Strike,Strike Zone Side,Strike Zone Height,Velocity,Total Spin,True Spin (release),Spin Efficiency (release),Spin Direction,Spin Confidence,VB (trajectory),HB (trajectory),SSW VB,SSW HB,VB (spin),HB (spin),Horizontal Angle,Release Angle,Release Height,Release Side,Gyro Degree (deg),Unique ID,Device Serial Number,SO - latLongConfidence,SO - latitude,SO - longitude,SO - rotMatConfidence,SO - timestamp,SO - Xx,SO - Xy,SO - Xz,SO - Yx,SO - Yy,SO - Yz,SO - Zx,SO - Zy,SO - Zz,Horizontal Approach Angle,Vertical Approach Angle,Session Name,Intent Type,Release Extension (ft)
+1,Sat Sep 06 2025 7:37:34 PM,1757187454,Fastball,N,18.94,34.04,83.11,2166.17,2166.1,100,10:28,1,22.2,-14.2,-,-,-,-,-5.78,-1.4,5.51,-2.63,-0.4,-,MTD-22117O95312,,,,,,,,,,,,,,,-,-,untitled,high_intent,62
+2,Sat Sep 06 2025 7:37:19 PM,1757187439,ChangeUp,N,21.05,9.63,73.65,2425.14,520.7,21.47,10:18,1,10.7,4.2,-,-,-,-,-4.24,-1.24,5.2,-2.62,-77.6,-,MTD-22117O95312,,,,,,,,,,,,,,,-,-,untitled,high_intent,69
+3,Sat Sep 06 2025 7:37:03 PM,1757187423,ChangeUp,Y,7.74,26.06,77.07,1480.44,1436,97,9:36,1,17.7,-13.6,-,-,-,-,-4.97,-0.53,4.91,-2.91,-14.07,-,MTD-22117O95312,,,,,,,,,,,,,,,-,-,untitled,high_intent,-
+4,Sat Sep 06 2025 7:36:47 PM,1757187407,Fastball,Y,6.07,38.33,82.64,2208.82,2194.7,99.36,10:26,1,14.7,-15.3,-,-,-,-,-4.55,-0.08,5.26,-2.39,-6.49,-,MTD-22117O95312,,,,,,,,,,,,,,,-,-,untitled,high_intent,-
+5,Sat Sep 06 2025 7:36:21 PM,1757187381,Fastball,N,28.91,40.24,82.68,2328.85,2295,98.55,10:22,1,20.4,-14.3,-,-,-,-,-6.54,-0.37,5.29,-2.47,-9.79,-,MTD-22117O95312,,,,,,,,,,,,,,,-,-,untitled,high_intent,-
+6,Sat Sep 06 2025 7:35:50 PM,1757187350,Slider,Y,8.15,40.25,74.64,2433.65,699.5,28.74,8:22,1,2.5,1,-,-,-,-,-3.58,2.71,4.88,-2.76,-73.3,-,MTD-22117O95312,,,,,,,,,,,,,,,-,-,untitled,high_intent,-
+7,Sat Sep 06 2025 7:35:36 PM,1757187336,Slider,N,42.22,-42.94,74.66,2546.23,586.8,23.05,7:20,1,-6.5,0.8,-,-,-,-,-6.15,-3.99,5.07,-2.3,-76.68,-,MTD-22117O95312,,,,,,,,,,,,,,,-,-,untitled,high_intent,-
+8,Sat Sep 06 2025 7:35:23 PM,1757187323,Fastball,N,-20.28,42.57,82.56,2238.55,2219.8,99.16,10:22,1,19.4,-21.2,-,-,-,-,-3.14,0.02,5.34,-2.87,7.41,-,MTD-22117O95312,,,,,,,,,,,,,,,-,-,untitled,high_intent,-
+9,Sat Sep 06 2025 7:34:33 PM,1757187273,ChangeUp,Y,-4.42,28.08,77.82,1852.01,1850.1,99.9,9:32,1,7.1,-20.6,-,-,-,-,-4.41,0.53,5.06,-2.82,-2.59,-,MTD-22117O95312,,,,,,,,,,,,,,,-,-,untitled,high_intent,-
+10,Sat Sep 06 2025 7:34:14 PM,1757187254,Fastball,N,-29.3,54.83,83.66,2216.86,2193,98.92,10:36,0.5,15.8,-18.7,-,-,-,-,-1.68,0.96,5.52,-2.46,-8.42,-,MTD-22117O95312,,,,,,,,,,,,,,,-,-,untitled,high_intent,-
+11,Sat Sep 06 2025 7:34:00 PM,1757187240,Fastball,Y,-1.26,40.84,83.39,2247.49,2247.2,99.99,10:02,1,13.9,-21.9,-,-,-,-,-4.7,0.4,5.21,-2.72,-0.88,-,MTD-22117O95312,,,,,,,,,,,,,,,-,-,untitled,high_intent,-
+12,Sat Sep 06 2025 7:33:44 PM,1757187224,Fastball,Y,1.78,40.46,83.98,2200.94,2194.8,99.72,10:10,1,15,-20.2,-,-,-,-,-4.72,0.23,5.19,-2.59,-4.29,-,MTD-22117O95312,,,,,,,,,,,,,,,-,-,untitled,high_intent,-
+13,Sat Sep 06 2025 7:33:32 PM,1757187212,Fastball,Y,1.77,32.94,82.94,2164.48,2152.4,99.44,10:10,1,15,-19.1,-,-,-,-,-4.46,-0.58,5.25,-2.43,-6.06,-,MTD-22117O95312,,,,,,,,,,,,,,,-,-,untitled,high_intent,-
+14,Sat Sep 06 2025 7:33:20 PM,1757187200,-,N,-,-,83.59,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,-,MTD-22117O95312,,,,,,,,,,,,,,,-,-,untitled,high_intent,-
