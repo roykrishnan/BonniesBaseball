@@ -106,13 +106,13 @@ st.markdown("""
         color: #ffffff;
     }
     .stMetric > div {
-    background-color: #ffffff !important;
-    border: 1px solid #54342c !important;
-    border-radius: 6px !important;
-    padding: 0.5rem !important;
-}
+        background-color: #f8f9fa !important;
+        border: 1px solid #54342c !important;
+        border-radius: 6px !important;
+        padding: 0.5rem !important;
+    }
     .stMetric [data-testid="metric-container"] {
-        background-color: #ffffff !important;
+        background-color: #f8f9fa !important;
         border: 1px solid #54342c !important;
         border-radius: 6px !important;
         padding: 0.5rem !important;
