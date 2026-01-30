@@ -908,7 +908,7 @@ def get_access_token():
 @st.cache_data(ttl=1800)
 def load_bonnies_players_from_csv():
     """Load St. Bonaventure Baseball players from CSV files"""
-    data_dir = "data"
+    data_dir = SESSION_CONFIG["January 2026"]["bullpen_dir"]
     bonnies_players = {}
     
     if not os.path.exists(data_dir):
