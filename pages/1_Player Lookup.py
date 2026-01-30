@@ -142,10 +142,27 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+#Date config
+SESSION_CONFIG = {
+    "September 2025": {
+        "bullpen_dir": "data/BullpenData090625",
+        "dev_reports_dir": "data/DevReports090625",
+        "biomech_dir": "data/BiomechReports090625",
+        "assessment_file": "data/BonniesBaseballTableAssessmentS1.xlsx",
+        "date_code": "090625"
+    },
+    "January 2026": {
+        "bullpen_dir": "data/BullpenData011826",
+        "dev_reports_dir": "data/DevReports011826",
+        "biomech_dir": "data/BiomechReports011826",
+        "assessment_file": "data/BonniesBaseballTableAssessmentS2.xlsx",
+        "date_code": "011826"
+    }
+}
+
 @st.cache_data
-def load_all_player_data():
+def load_all_player_data(data_dir):
     """Load all player data for lookup functionality"""
-    data_dir = "data"
     all_players = {}
     
     if not os.path.exists(data_dir):
@@ -249,9 +266,82 @@ def load_all_player_data():
             continue
     
     return all_players
-
+@st.cache_data(ttl=600)
+def fetch_player_dynamo_tests(profile_id, modified_from_date):
+    """Fetch Dynamo test data for a specific player"""
+    if not profile_id:
+        return pd.DataFrame()
+    
+    token = get_access_token()
+    if not token:
+        return pd.DataFrame()
+    
+    headers = {"Authorization": f"Bearer {token}"}
+    
+    # Date parameters - all three are REQUIRED for Dynamo API
+    from datetime import datetime
+    now = datetime.now()
+    test_from = f"{modified_from_date}T00:00:00.000Z"
+    test_to = now.strftime('%Y-%m-%dT23:59:59.000Z')
+    modified_from = f"{modified_from_date}T00:00:00.000Z"
+    
+    tenant_id = VALD_CONFIG['tenant_id']
+    base = VALD_CONFIG['dynamo_base_url']
+    
+    # Dynamo uses different endpoint structure
+    url = f"{base}/v2022q2/teams/{tenant_id}/tests"
+    
+    all_tests = []
+    page = 1
+    max_pages = 20
+    
+    try:
+        while page <= max_pages:
+            params = {
+                "modifiedFromUtc": modified_from,
+                "testFromUtc": test_from,
+                "testToUtc": test_to,
+                "includeRepSummaries": "true",
+                "page": page
+            }
+            
+            response = requests.get(url, headers=headers, params=params, timeout=15)
+            
+            if response.status_code == 204:
+                break
+            
+            if response.ok:
+                data = response.json()
+                items = data.get("items", [])
+                total_pages = data.get("totalPages", 1)
+                
+                if items:
+                    # Filter for this specific player
+                    filtered_tests = [test for test in items if test.get('athleteId') == profile_id]
+                    all_tests.extend(filtered_tests)
+                
+                if page >= total_pages:
+                    break
+                page += 1
+            else:
+                break
+        
+        if all_tests:
+            df = pd.DataFrame(all_tests)
+            df['test_date'] = pd.to_datetime(df['startTimeUTC']).dt.date
+            return df
+        return pd.DataFrame()
+        
+    except Exception as e:
+        return pd.DataFrame()
+    
 def calculate_bonnies_stuff_plus_for_pitch_type(df, pitch_type, player_fastball_velocity=None):
-    """Calculate Bonnies Stuff+ for a specific pitch type using updated weights"""
+    """Calculate Bonnies Stuff+ for a specific pitch type using updated weights
+    
+    Includes penalty for pitches with similar H-break and V-break values,
+    as distinctive movement profiles (dominant in one direction) are generally
+    more effective than diagonal movement.
+    """
     
     def normalize_component(values, higher_is_better=True):
         if len(values) == 0 or values.std() == 0:
@@ -287,15 +377,16 @@ def calculate_bonnies_stuff_plus_for_pitch_type(df, pitch_type, player_fastball_
     
     # Updated weights - final version
     weights = {
-        'velocity': 0.225,         # 22.5%
-        'spin_rate': 0.175,        # 17.5%  
-        'release_height': 0.125,   # 12.5%
-        'distinctive_shape': 0.125, # 12.5%
-        'release_side': 0.085,     # 8.5%
+        'velocity': 0.20,          # 20% (reduced slightly)
+        'spin_rate': 0.15,         # 15% (reduced slightly)
+        'release_height': 0.10,    # 10%
+        'distinctive_shape': 0.15, # 15% (increased - rewards dominant axis)
+        'release_side': 0.08,      # 8%
         'horizontal_break': 0.10,  # 10%
         'vertical_break': 0.10,    # 10%
-        'speed_diff': 0.075,       # 7.5%
-        'horizontal_angle': 0.05   # 5%
+        'speed_diff': 0.07,        # 7%
+        'horizontal_angle': 0.05,  # 5%
+        'movement_distinction': 0.10  # 10% NEW - penalizes similar H/V break
     }
     
     # Calculate metrics for this pitch type
@@ -306,16 +397,14 @@ def calculate_bonnies_stuff_plus_for_pitch_type(df, pitch_type, player_fastball_
     horizontal_angle = df['Horizontal Angle'].mean() if 'Horizontal Angle' in df.columns else 0
     h_break = abs(df['HB (trajectory)'].mean()) if 'HB (trajectory)' in df.columns else 0
     v_break = df['VB (trajectory)'].mean() if 'VB (trajectory)' in df.columns else 0
+    v_break_abs = abs(v_break)
     
     # Calculate speed difference vs player's own fastball
     if pitch_type != 'Fastball' and player_fastball_velocity is not None:
         speed_diff = max(0, player_fastball_velocity - velocity)
     else:
         speed_diff = 0
-    
-    # For single player analysis, we need to create artificial distributions for normalization
-    # Since we only have one data point per metric, we'll use simplified scoring
-    
+
     # Velocity scoring (pitch-type specific)
     if pitch_type == 'Fastball':
         velocity_score = min(1.0, max(0.0, (velocity - 70) / 30))  # 70-100 mph range
@@ -353,11 +442,51 @@ def calculate_bonnies_stuff_plus_for_pitch_type(df, pitch_type, player_fastball_
     
     # Movement scores
     h_break_score = min(1.0, h_break / 20)  # 20 inches max
-    v_break_score = min(1.0, abs(v_break) / 20)  # 20 inches max
+    v_break_score = min(1.0, v_break_abs / 20)  # 20 inches max
     
     # Distinctive shape: reward pitches where |horizontal_break| - |vertical_break| deviates from 0
-    shape_differential = abs(h_break - abs(v_break))
+    # This rewards pitches that are dominant in ONE direction
+    shape_differential = abs(h_break - v_break_abs)
     distinctive_shape_score = min(1.0, shape_differential / 15)  # 15 inches max difference
+    
+    # NEW: Movement distinction score - PENALIZES similar H and V break values
+    # When H-break and V-break are very similar, the pitch has "diagonal" movement
+    # which is generally less effective than movement dominant in one axis
+    # 
+    # Calculate how similar the two break values are (ratio closer to 1 = more similar)
+    # We want to penalize when both values are significant AND similar
+    
+    total_movement = h_break + v_break_abs
+    
+    if total_movement > 5:  # Only apply penalty if there's meaningful movement
+        # Calculate the ratio of smaller to larger break
+        # Ratio of 1.0 = identical breaks (bad), Ratio near 0 = very different (good)
+        min_break = min(h_break, v_break_abs)
+        max_break = max(h_break, v_break_abs)
+        
+        if max_break > 0:
+            similarity_ratio = min_break / max_break  # 0 to 1, where 1 = identical
+            
+            # Apply stronger penalty when both breaks are large AND similar
+            # Scale penalty by total movement (more movement + similar = worse)
+            movement_magnitude_factor = min(1.0, total_movement / 30)  # Max factor at 30 inches total
+            
+            # Movement distinction score: high when breaks are DIFFERENT, low when SIMILAR
+            # similarity_ratio of 1.0 (identical) -> score of 0.0 (bad)
+            # similarity_ratio of 0.0 (one axis dominant) -> score of 1.0 (good)
+            base_distinction_score = 1.0 - similarity_ratio
+            
+            # Apply magnitude scaling - penalize more severely when total movement is high
+            # A pitch with 5H/5V is less concerning than 20H/20V
+            movement_distinction_score = base_distinction_score * (0.5 + 0.5 * (1 - movement_magnitude_factor * similarity_ratio))
+            
+            # Ensure it stays in valid range
+            movement_distinction_score = max(0.0, min(1.0, movement_distinction_score))
+        else:
+            movement_distinction_score = 0.5  # Neutral if no movement
+    else:
+        # Low total movement - don't penalize, give neutral score
+        movement_distinction_score = 0.5
     
     # Calculate weighted composite score
     composite_score = (
@@ -369,7 +498,8 @@ def calculate_bonnies_stuff_plus_for_pitch_type(df, pitch_type, player_fastball_
         speed_diff_score * weights['speed_diff'] +
         h_break_score * weights['horizontal_break'] +
         v_break_score * weights['vertical_break'] +
-        distinctive_shape_score * weights['distinctive_shape']
+        distinctive_shape_score * weights['distinctive_shape'] +
+        movement_distinction_score * weights['movement_distinction']
     )
     
     # Convert to Stuff+ scale where 100 = average (0.5 composite score)
@@ -430,14 +560,11 @@ def calculate_player_stuff_plus(pitch_data):
     
     return pitch_stuff
 
-def find_available_reports(player_name):
+def find_available_reports(player_name, reports_dir):
     """Find all available development reports for a player"""
     
     # Format player name to match filename convention
     formatted_name = player_name.replace(" ", "")
-    
-    # Path to the development reports directory
-    reports_dir = os.path.join("data", "Dev Reports")
     
     if not os.path.exists(reports_dir):
         return []
@@ -494,19 +621,27 @@ def load_specific_pitch_development_report(file_path):
     except Exception as e:
         return f"Error loading development report: {str(e)}"
 
-def display_pitch_development_report_section(player_name):
+def display_pitch_development_report_section(player_name, reports_dir, fallback_reports_dir=None):
     """Display the pitch development report section with date selection"""
     
     st.markdown('<h3 class="section-header">Player Development Report</h3>', unsafe_allow_html=True)
     
-    # Find all available reports for this player
-    available_reports = find_available_reports(player_name)
+    # Find all available reports for this player in current directory
+    available_reports = find_available_reports(player_name, reports_dir)
+    
+    # If no reports found and we have a fallback directory, try that
+    using_fallback = False
+    if not available_reports and fallback_reports_dir:
+        available_reports = find_available_reports(player_name, fallback_reports_dir)
+        if available_reports:
+            using_fallback = True
+            st.info(f"No reports found for current session. Showing reports from previous session.")
     
     if not available_reports:
-        # No reports found
+        # No reports found in either location
         formatted_name = player_name.replace(" ", "")
         st.warning(f"No development reports found for {player_name}")
-        st.info(f"Expected filename format: `data/Dev Reports/{formatted_name}MMDDYY.txt` (e.g., {formatted_name}090625.txt)")
+        st.info(f"Expected filename format: `{reports_dir}/{formatted_name}MMDDYY.txt` (e.g., {formatted_name}090625.txt)")
         return
     
     # Create date selection buttons or dropdown
@@ -565,7 +700,8 @@ def display_pitch_development_report_section(player_name):
         with col1:
             st.caption(f"*Report Date: {selected_report['display_date']}*")
         with col2:
-            pass
+            if using_fallback:
+                st.caption("*(From previous session)*")
         
         # Show total number of reports available
         if len(available_reports) > 1:
@@ -738,7 +874,7 @@ def create_movement_chart(pitch_data):
     
     # Add legend with better positioning and explanation
     legend_elements = ax.get_legend_handles_labels()
-    legend = ax.legend(*legend_elements, loc='upper right', framealpha=0.8)
+    legend = ax.legend(*legend_elements, loc='upper left', framealpha=0.8)
     
     # Add explanation text
     ax.text(0.02, 0.02, 'Diamond = Average\nDashed ellipse = Expected range', 
@@ -863,19 +999,6 @@ import requests
 VALD_CONFIG = st.secrets["VALD_CONFIG"]
 
 # Add these new functions after your existing functions
-
-@st.cache_data(ttl=300)
-def get_access_token():
-    """Get access token from VALD API"""
-    token_data = {
-        "grant_type": "client_credentials",
-        "client_id": VALD_CONFIG["client_id"],
-        "client_secret": VALD_CONFIG["client_secret"]
-    }
-    
-    response = requests.post(VALD_CONFIG["token_url"], data=token_data)
-    return response.json()["access_token"] if response.ok else None
-
 @st.cache_data(ttl=1800)
 def fetch_all_vald_profiles():
     """Fetch all profiles from External Profiles API"""
@@ -918,6 +1041,18 @@ def fetch_all_vald_profiles():
     except Exception as e:
         st.error(f"Error fetching profiles: {str(e)}")
         return {}
+    
+@st.cache_data(ttl=300)
+def get_access_token():
+    """Get access token from VALD API"""
+    token_data = {
+        "grant_type": "client_credentials",
+        "client_id": VALD_CONFIG["client_id"],
+        "client_secret": VALD_CONFIG["client_secret"]
+    }
+    
+    response = requests.post(VALD_CONFIG["token_url"], data=token_data)
+    return response.json()["access_token"] if response.ok else None
 
 @st.cache_data(ttl=1800)
 def get_vald_team_id():
@@ -1109,342 +1244,7 @@ def find_player_vald_profile_id(player_name, all_profiles):
             return profile_id
     return None
 
-def display_player_force_plate_section(player_name):
-    """Display Force Plate section for the selected player"""
-    
-    st.markdown('<h3 class="section-header">Force Plate Performance Analysis</h3>', unsafe_allow_html=True)
-    
-    # Initialize VALD profiles in session state if not done
-    if 'vald_profiles' not in st.session_state:
-        st.session_state.vald_profiles = {}
-    if 'vald_profiles_loaded' not in st.session_state:
-        st.session_state.vald_profiles_loaded = False
-    
-    # Load VALD profiles
-    if not st.session_state.vald_profiles_loaded:
-        with st.spinner("Loading VALD profiles..."):
-            st.session_state.vald_profiles = fetch_all_vald_profiles()
-            st.session_state.vald_profiles_loaded = True
-    
-    # Find player's VALD profile ID
-    player_profile_id = find_player_vald_profile_id(player_name, st.session_state.vald_profiles)
-    
-    if not player_profile_id:
-        st.warning(f"No VALD profile found for {player_name}")
-        
-        # Show available profiles for debugging
-        with st.expander("Available VALD Profiles (for debugging)", expanded=False):
-            profile_names = [profile['fullName'] for profile in st.session_state.vald_profiles.values()]
-            st.write(f"Found {len(profile_names)} profiles:")
-            for name in sorted(profile_names)[:20]:  # Show first 20
-                st.write(f"- {name}")
-        return
-    
-    st.success(f"Found VALD profile for {player_name}")
-    
-    # Date selection and exercise selection
-    col1, col2 = st.columns([1, 1])
-    
-    with col1:
-        force_plate_date = st.date_input(
-            "Load Force Plate Data From:",
-            value=date(2025, 9, 6),
-            min_value=date(2025, 9, 1),
-            max_value=date.today(),
-            key=f"fp_date_{player_name}"
-        )
-
-        load_fp_data = st.button("Load Data", type="primary", key=f"load_fp_{player_name}")
-    
-    with col2:
-        # Exercise selection
-        exercise_options = {
-            "CMJ Performance": "CMJ",
-            "Squat Jump Performance": "SJ", 
-            "Hop Jump Performance": "HJ",
-            "Plyo Pushup Performance": "PPU"
-        }
-        
-        selected_exercise = st.selectbox(
-            "Select Exercise Type:",
-            options=list(exercise_options.keys()),
-            key=f"exercise_select_{player_name}"
-        )
-        
-        exercise_code = exercise_options[selected_exercise]
-    
-    # Load Force Plate data
-    if load_fp_data:
-        team_id = get_vald_team_id()
-        
-        with st.spinner("Loading force plate data..."):
-            # Get test summaries for this specific player
-            df = fetch_player_forcedecks_tests(player_profile_id, force_plate_date.strftime('%Y-%m-%d'))
-            
-            if not df.empty:
-                st.success(f"Found {len(df)} tests for {player_name}")
-                
-                # Get trial data
-                test_ids = df['testId'].unique().tolist()
-                trials_df = fetch_test_trials_for_player(team_id, test_ids)
-                
-                if not trials_df.empty:
-                    # Extract performance metrics
-                    perf_df = extract_player_performance_metrics(trials_df, df)
-                    
-                    if not perf_df.empty:
-                        # Store in session state
-                        st.session_state[f'fp_data_{player_name}'] = perf_df
-                        st.success(f"Loaded {len(perf_df)} performance measurements")
-                    else:
-                        st.error("No performance metrics extracted from trial data")
-                else:
-                    st.error("No trial data found")
-            else:
-                st.warning(f"No test data found for {player_name} from {force_plate_date}")
-    
-    # Display Force Plate data if available
-    if f'fp_data_{player_name}' in st.session_state:
-        perf_df = st.session_state[f'fp_data_{player_name}']
-        display_selected_exercise_analysis(perf_df, player_name, exercise_code, selected_exercise)
-
-def get_daily_values_for_metric(exercise_data, metric, exercise_code):
-    """Get daily values for a metric - all repeats for HJ, max for others"""
-    # Filter for the metric and trial limb only
-    metric_data = exercise_data[
-        (exercise_data['metric_name'] == metric) & 
-        (exercise_data['limb'] == 'Trial')
-    ].copy()
-    
-    if metric_data.empty:
-        return pd.DataFrame()
-    
-    if exercise_code == 'HJ':  # Hop Jump - show all repeat numbers
-        # For HJ, group by date and include all repeat numbers
-        daily_values = []
-        for date, group in metric_data.groupby('test_date'):
-            for _, row in group.iterrows():
-                daily_values.append({
-                    'test_date': date, 
-                    'value': row['value'],
-                    'repeat': row['repeat']
-                })
-        
-        return pd.DataFrame(daily_values) if daily_values else pd.DataFrame()
-    else:
-        # Other exercises - take max value per day (unchanged)
-        daily_max = metric_data.groupby('test_date')['value'].max().reset_index()
-        return daily_max.sort_values('test_date')
-
-def create_cmj_quadrant_analysis(exercise_data, player_name):
-    """Create a 2x2 quadrant analysis for CMJ data using E:C Ratio methodology with traditional grid"""
-    
-    # Filter for CMJ data and trial limb only
-    cmj_data = exercise_data[
-        (exercise_data['testType'] == 'CMJ') & 
-        (exercise_data['limb'] == 'Trial')
-    ].copy()
-    
-    if cmj_data.empty:
-        return None
-    
-    # CREATE THE test_date COLUMN HERE (this was missing!)
-    cmj_data['test_date'] = pd.to_datetime(cmj_data['recordedUTC']).dt.date
-    
-    # Define the key metrics we need for E:C Ratio analysis
-    # Using the EXACT metric names from VALD API for concentric and eccentric impulse
-    required_metrics = {
-        'concentric_impulse': ['Concentric Impulse'],
-        'eccentric_deceleration': ['Eccentric Deceleration Impulse'],
-        'eccentric_braking': ['Eccentric Braking Impulse']
-    }
-    
-    # Extract the metrics we need
-    metrics_data = {}
-    
-    for category, metric_names in required_metrics.items():
-        for metric_name in metric_names:
-            # Find exact matching metrics in the data
-            matching_metrics = cmj_data[cmj_data['metric_name'] == metric_name]
-            
-            if not matching_metrics.empty:
-                # Get daily max values
-                daily_values = matching_metrics.groupby('test_date')['value'].max().reset_index()
-                
-                if len(daily_values) > 0:
-                    metrics_data[category] = {
-                        'values': daily_values['value'].values,
-                        'dates': daily_values['test_date'].values,
-                        'latest': daily_values['value'].iloc[-1],
-                        'mean': daily_values['value'].mean(),
-                        'metric_name': matching_metrics.iloc[0]['metric_name'],
-                        'units': matching_metrics.iloc[0].get('units', '')
-                    }
-                    break  # Use first matching metric found
-    
-    # Check if we have all required metrics
-    if 'concentric_impulse' not in metrics_data:
-        st.warning("CMJ quadrant analysis requires Concentric Impulse metric")
-        return None
-        
-    if 'eccentric_deceleration' not in metrics_data or 'eccentric_braking' not in metrics_data:
-        st.warning("CMJ quadrant analysis requires both Eccentric Deceleration Impulse and Eccentric Braking Impulse metrics")
-        return None
-    
-    # Get the data
-    concentric_data = metrics_data['concentric_impulse']
-    eccentric_decel_data = metrics_data['eccentric_deceleration']
-    eccentric_brake_data = metrics_data['eccentric_braking']
-    
-    # Match data points by date for all three metrics
-    conc_df = pd.DataFrame({'date': concentric_data['dates'], 'concentric': concentric_data['values']})
-    ecc_decel_df = pd.DataFrame({'date': eccentric_decel_data['dates'], 'eccentric_decel': eccentric_decel_data['values']})
-    ecc_brake_df = pd.DataFrame({'date': eccentric_brake_data['dates'], 'eccentric_brake': eccentric_brake_data['values']})
-    
-    # Merge all three metrics on date
-    combined_df = pd.merge(conc_df, ecc_decel_df, on='date', how='inner')
-    combined_df = pd.merge(combined_df, ecc_brake_df, on='date', how='inner')
-    
-    if len(combined_df) == 0:
-        st.warning("No matching dates between Concentric, Eccentric Deceleration, and Eccentric Braking Impulse data")
-        return None
-    
-    # Calculate combined eccentric impulse (deceleration + braking)
-    combined_df['eccentric_total'] = combined_df['eccentric_decel'] + combined_df['eccentric_brake']
-    
-    # Calculate E:C Ratio using combined eccentric impulse
-    combined_df['ec_ratio'] = combined_df['eccentric_total'] / combined_df['concentric']
-    
-    # Create the quadrant plot
-    plt.style.use('dark_background')
-    fig, ax = plt.subplots(figsize=(10, 10))
-    fig.patch.set_facecolor('#1e1e1e')
-    ax.set_facecolor('#1e1e1e')
-    
-    # Use fixed grid boundaries (not based on data means)
-    # Calculate reasonable fixed boundaries based on data range
-    x_values = combined_df['concentric'].values
-    y_values = combined_df['eccentric_total'].values  # Use combined eccentric values
-    
-    # Create fixed grid lines at the center of the data range
-    x_center = (x_values.min() + x_values.max()) / 2
-    y_center = (y_values.min() + y_values.max()) / 2
-    
-    # Add quadrant grid lines (fixed positioning)
-    ax.axhline(y=y_center, color='white', linestyle='-', alpha=0.8, linewidth=2)
-    ax.axvline(x=x_center, color='white', linestyle='-', alpha=0.8, linewidth=2)
-    
-    # Plot data points with color and positioning based on E:C ratio classification
-    dates = combined_df['date'].values
-    ec_ratios = combined_df['ec_ratio'].values
-    
-    for i, (x_orig, y_orig, date, ec_ratio) in enumerate(zip(x_values, y_values, dates, ec_ratios)):
-        
-        # Determine classification and quadrant positioning based on E:C ratio
-        if ec_ratio < 0.8:
-            # Concentric Deficient - place in bottom right quadrant
-            color = 'orange'
-            classification = 'Concentric Deficient'
-            x_plot = x_center + (x_center * 0.3)  # Right side
-            y_plot = y_center - (y_center * 0.3)  # Bottom side
-        elif ec_ratio > 1.2:
-            # Eccentric Deficient - place in top left quadrant  
-            color = 'yellow'
-            classification = 'Eccentric Deficient'
-            x_plot = x_center - (x_center * 0.3)  # Left side
-            y_plot = y_center + (y_center * 0.3)  # Top side
-        else:
-            # Balanced/Maintenance - place in top right quadrant
-            color = 'lightgreen'
-            classification = 'Balanced'
-            x_plot = x_center + (x_center * 0.3)  # Right side
-            y_plot = y_center + (y_center * 0.3)  # Top side
-        
-        # Add some variation so multiple points don't overlap exactly
-        if len(x_values) > 1:
-            x_offset = (i - len(x_values)/2) * (x_center * 0.05)
-            y_offset = (i - len(y_values)/2) * (y_center * 0.05)
-            x_plot += x_offset
-            y_plot += y_offset
-        
-        # Plot the point
-        ax.scatter(x_plot, y_plot, c=color, s=150, edgecolors='white', linewidth=2, alpha=0.8)
-        
-        # Add date labels and E:C ratio for all points
-        ax.annotate(f'{pd.to_datetime(date).strftime("%m/%d")}\nE:C: {ec_ratio:.2f}', 
-                   (x_plot, y_plot), xytext=(10, 10), textcoords='offset points',
-                   color='white', fontsize=10, fontweight='bold')
-    
-    # Set axis limits with better scaling to accommodate all quadrants and data points
-    # Calculate ranges and ensure adequate space for all quadrants
-    x_range = x_values.max() - x_values.min()
-    y_range = y_values.max() - y_values.min()
-    
-    # Use larger padding to ensure points don't get cut off and quadrants are visible
-    x_padding = max(x_range * 0.5, x_center * 0.4)  # At least 50% padding or 40% of center
-    y_padding = max(y_range * 0.5, y_center * 0.4)
-    
-    # Ensure we have space around the center lines for all quadrants
-    x_min = min(x_values.min() - x_padding, x_center - x_padding)
-    x_max = max(x_values.max() + x_padding, x_center + x_padding)
-    y_min = min(y_values.min() - y_padding, y_center - y_padding)
-    y_max = max(y_values.max() + y_padding, y_center + y_padding)
-    
-    ax.set_xlim(x_min, x_max)
-    ax.set_ylim(y_min, y_max)
-    
-    # Add quadrant labels in fixed positions
-    xlim = ax.get_xlim()
-    ylim = ax.get_ylim()
-    
-    # Calculate positions for quadrant labels
-    x_left = xlim[0] + (x_center - xlim[0]) * 0.5
-    x_right = x_center + (xlim[1] - x_center) * 0.5
-    y_bottom = ylim[0] + (y_center - ylim[0]) * 0.5
-    y_top = y_center + (ylim[1] - y_center) * 0.5
-    
-    # Add quadrant labels with background boxes
-    label_style = dict(boxstyle='round,pad=0.5', facecolor='black', alpha=0.7, edgecolor='white')
-    
-    # Top-left: Eccentric Deficient
-    ax.text(x_left, y_top, 'ECCENTRIC\nDEFICIENT', 
-            ha='center', va='center', color='yellow', fontsize=12, fontweight='bold',
-            bbox=label_style)
-    
-    # Top-right: Maintenance/Balanced
-    ax.text(x_right, y_top, 'MAINTENANCE', 
-            ha='center', va='center', color='lightgreen', fontsize=12, fontweight='bold',
-            bbox=label_style)
-    
-    # Bottom-left: Foundationally Deficient (if needed for very low values)
-    ax.text(x_left, y_bottom, 'LOW OVERALL\nCAPABILITY', 
-            ha='center', va='center', color='lightcoral', fontsize=12, fontweight='bold',
-            bbox=label_style)
-    
-    # Bottom-right: Concentric Deficient
-    ax.text(x_right, y_bottom, 'CONCENTRIC\nDEFICIENT', 
-            ha='center', va='center', color='orange', fontsize=12, fontweight='bold',
-            bbox=label_style)
-    
-    # Customize the plot
-    ax.set_xlabel(f"Concentric Impulse ({concentric_data['units']})", color='white', fontsize=14, fontweight='bold')
-    ax.set_ylabel(f"Combined Eccentric Impulse ({eccentric_decel_data['units']})", color='white', fontsize=14, fontweight='bold')
-    ax.set_title(f'{player_name} - CMJ E:C Ratio Analysis', 
-                color='white', fontsize=16, fontweight='bold', pad=20)
-    
-    # Style the axes
-    ax.tick_params(axis='both', colors='white', labelsize=12)
-    ax.spines['bottom'].set_color('white')
-    ax.spines['top'].set_color('white')
-    ax.spines['right'].set_color('white')
-    ax.spines['left'].set_color('white')
-    
-    # Add grid
-    ax.grid(True, alpha=0.3, color='white', linestyle=':', linewidth=0.5)
-    
-    return fig
-
-def display_selected_exercise_analysis(perf_df, player_name, exercise_code, exercise_display_name):
+def display_selected_exercise_analysis(perf_df, player_name, exercise_code, exercise_display_name, comparison_perf_df=None):
     """Display analysis for the selected exercise with daily max values for progression"""
     
     if perf_df.empty:
@@ -1486,8 +1286,17 @@ def display_selected_exercise_analysis(perf_df, player_name, exercise_code, exer
     
     # Special handling for CMJ - show quadrant analysis instead of progression charts
     if exercise_code == 'CMJ':
-    
-        quadrant_chart = create_cmj_quadrant_analysis(exercise_data, player_name)
+        # Get comparison data for CMJ quadrant if available
+        comparison_exercise_data_for_quadrant = None
+        if comparison_perf_df is not None and not comparison_perf_df.empty:
+            comparison_perf_df_copy = comparison_perf_df.copy()
+            comparison_perf_df_copy['testType'] = comparison_perf_df_copy['testType'].replace('SLJ', 'SJ')
+            comparison_exercise_data_for_quadrant = comparison_perf_df_copy[comparison_perf_df_copy['testType'] == 'CMJ'].copy()
+            if not comparison_exercise_data_for_quadrant.empty:
+                comparison_exercise_data_for_quadrant['test_date'] = pd.to_datetime(comparison_exercise_data_for_quadrant['recordedUTC']).dt.date
+        
+        quadrant_chart = create_cmj_quadrant_analysis(exercise_data, player_name, comparison_exercise_data_for_quadrant)
+        
         if quadrant_chart:
             st.pyplot(quadrant_chart)
             plt.close()
@@ -1526,25 +1335,44 @@ def display_selected_exercise_analysis(perf_df, player_name, exercise_code, exer
     # Convert recordedUTC to date for daily grouping
     exercise_data['test_date'] = pd.to_datetime(exercise_data['recordedUTC']).dt.date
     
-    # Overall summary metrics
+    # Get comparison exercise data for summary metrics
+    comparison_exercise_data_for_summary = None
+    if comparison_perf_df is not None and not comparison_perf_df.empty:
+        comparison_perf_df_copy = comparison_perf_df.copy()
+        comparison_perf_df_copy['testType'] = comparison_perf_df_copy['testType'].replace('SLJ', 'SJ')
+        comparison_exercise_data_for_summary = comparison_perf_df_copy[comparison_perf_df_copy['testType'] == exercise_code].copy()
+        if not comparison_exercise_data_for_summary.empty:
+            comparison_exercise_data_for_summary['test_date'] = pd.to_datetime(comparison_exercise_data_for_summary['recordedUTC']).dt.date
+    
+    # Overall summary metrics - combine both sessions if comparison exists
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        total_test_days = len(exercise_data['test_date'].unique())
+        # Count test days from both sessions
+        all_test_days = set(exercise_data['test_date'].unique())
+        if comparison_exercise_data_for_summary is not None and not comparison_exercise_data_for_summary.empty:
+            all_test_days = all_test_days.union(set(comparison_exercise_data_for_summary['test_date'].unique()))
+        total_test_days = len(all_test_days)
         st.metric("Test Days", total_test_days)
     
     with col2:
         if exercise_code == 'HJ':
-            # For HJ, show number of repeats
+            # For HJ, show number of repeats from current session only (repeats are per-session)
             total_repeats = len(exercise_data[exercise_data['limb'] == 'Trial']['repeat'].unique())
             st.metric("Total Repeats", total_repeats)
         else:
-            # For other exercises, show trial count
-            total_trials = len(exercise_data['trialId'].unique())
+            # For other exercises, show trial count from both sessions
+            all_trials = set(exercise_data['trialId'].unique())
+            if comparison_exercise_data_for_summary is not None and not comparison_exercise_data_for_summary.empty:
+                all_trials = all_trials.union(set(comparison_exercise_data_for_summary['trialId'].unique()))
+            total_trials = len(all_trials)
             st.metric("Total Tests", total_trials)
     
     with col3:
+        # Total reps from both sessions
         total_reps = len(exercise_data)
+        if comparison_exercise_data_for_summary is not None and not comparison_exercise_data_for_summary.empty:
+            total_reps += len(comparison_exercise_data_for_summary)
         st.metric("Total Reps", total_reps)
     
     with col4:
@@ -1555,6 +1383,7 @@ def display_selected_exercise_analysis(perf_df, player_name, exercise_code, exer
         else:
             st.metric("Latest Test", "N/A")
     
+    # For HJ, display fatigue metrics separately (not as graphs)
     # For HJ, display fatigue metrics separately (not as graphs)
     if exercise_code == 'HJ':
         fatigue_metrics = [metric for metric in available_metrics if 'fatigue' in metric.lower()]
@@ -1572,8 +1401,20 @@ def display_selected_exercise_analysis(perf_df, player_name, exercise_code, exer
             if should_include:
                 filtered_fatigue_metrics.append(metric)
         
+        # Get comparison HJ data if available
+        comparison_hj_data = None
+        if comparison_perf_df is not None and not comparison_perf_df.empty:
+            comparison_perf_df_copy = comparison_perf_df.copy()
+            comparison_perf_df_copy['testType'] = comparison_perf_df_copy['testType'].replace('SLJ', 'SJ')
+            comparison_hj_data = comparison_perf_df_copy[comparison_perf_df_copy['testType'] == 'HJ'].copy()
+        
         if filtered_fatigue_metrics:
             st.subheader("Fatigue Analysis")
+            
+            # Show comparison indicator if we have baseline data
+            if comparison_hj_data is not None and not comparison_hj_data.empty:
+                st.caption("Showing change vs September 2025 baseline")
+            
             fatigue_cols = st.columns(min(len(filtered_fatigue_metrics), 4))
             
             for i, metric in enumerate(filtered_fatigue_metrics):
@@ -1588,18 +1429,51 @@ def display_selected_exercise_analysis(perf_df, player_name, exercise_code, exer
                 if not fatigue_data.empty:
                     units = fatigue_data.iloc[0].get('units', '')
                     latest_value = fatigue_data.iloc[-1]['value'] if len(fatigue_data) > 0 else 0
-                    avg_value = fatigue_data['value'].mean()
+                    
+                    # Calculate comparison delta if we have baseline data
+                    delta = None
+                    if comparison_hj_data is not None and not comparison_hj_data.empty:
+                        comp_fatigue_data = comparison_hj_data[
+                            (comparison_hj_data['metric_name'] == metric) & 
+                            (comparison_hj_data['limb'] == 'Trial')
+                        ]
+                        if not comp_fatigue_data.empty:
+                            baseline_value = comp_fatigue_data.iloc[-1]['value'] if len(comp_fatigue_data) > 0 else None
+                            if baseline_value is not None:
+                                delta = latest_value - baseline_value
                     
                     with fatigue_cols[col_idx]:
-                        st.metric(
-                            f"{metric.replace('Fatigue', '').strip()}",
-                            f"{latest_value:.2f} {units}",
-                            f"Avg: {avg_value:.2f}"
-                        )
+                        if delta is not None:
+                            st.metric(
+                                f"{metric.replace('Fatigue', '').strip()}",
+                                f"{latest_value:.2f} {units}",
+                                delta=f"{delta:+.2f} vs Sept"
+                            )
+                        else:
+                            avg_value = fatigue_data['value'].mean()
+                            st.metric(
+                                f"{metric.replace('Fatigue', '').strip()}",
+                                f"{latest_value:.2f} {units}",
+                                f"Avg: {avg_value:.2f}"
+                            )
+                
+                # Start new row of columns after every 4 metrics
+                if (i + 1) % 4 == 0 and (i + 1) < len(filtered_fatigue_metrics):
+                    fatigue_cols = st.columns(min(len(filtered_fatigue_metrics) - (i + 1), 4))
     
     # Display key metrics in columns - SKIP FOR HJ
     if exercise_code != 'HJ':
         st.subheader("Current Performance Metrics")
+        
+        # Get comparison exercise data if available
+        comparison_exercise_data = None
+        if comparison_perf_df is not None and not comparison_perf_df.empty:
+            comparison_perf_df_copy = comparison_perf_df.copy()
+            comparison_perf_df_copy['testType'] = comparison_perf_df_copy['testType'].replace('SLJ', 'SJ')
+            comparison_exercise_data = comparison_perf_df_copy[comparison_perf_df_copy['testType'] == exercise_code].copy()
+            if not comparison_exercise_data.empty:
+                comparison_exercise_data['test_date'] = pd.to_datetime(comparison_exercise_data['recordedUTC']).dt.date
+        
         cols = st.columns(min(len(matched_metrics), 4))
         
         for i, metric in enumerate(matched_metrics[:4]):  # Show up to 4 metrics
@@ -1617,12 +1491,75 @@ def display_selected_exercise_analysis(perf_df, player_name, exercise_code, exer
                 best_value = metric_data['value'].max()
                 recent_value = metric_data.iloc[-1]['value'] if len(metric_data) > 0 else best_value
                 
+                # Calculate comparison delta if we have baseline data
+                delta = None
+                if comparison_exercise_data is not None and not comparison_exercise_data.empty:
+                    comp_metric_data = comparison_exercise_data[
+                        (comparison_exercise_data['metric_name'] == metric) & 
+                        (comparison_exercise_data['limb'] == 'Trial')
+                    ]
+                    if not comp_metric_data.empty:
+                        baseline_best = comp_metric_data['value'].max()
+                        delta = best_value - baseline_best
+                
                 with cols[col_idx]:
-                    st.metric(
-                        f"{metric.replace('(Flight Time)', '')}",
-                        f"{best_value:.2f} {units}",
-                        f"Recent: {recent_value:.2f}"
-                    )
+                    if delta is not None:
+                        st.metric(
+                            f"{metric.replace('(Flight Time)', '')}",
+                            f"{best_value:.2f} {units}",
+                            delta=f"{delta:+.2f} vs Sept"
+                        )
+                    else:
+                        st.metric(
+                            f"{metric.replace('(Flight Time)', '')}",
+                            f"{best_value:.2f} {units}",
+                            f"Recent: {recent_value:.2f}"
+                        )
+        
+        # Show comparison summary table if we have baseline data
+        if comparison_exercise_data is not None and not comparison_exercise_data.empty:
+            st.markdown("---")
+            st.subheader("Performance Comparison vs September Baseline")
+            
+            comparison_table_data = []
+            for metric in matched_metrics:
+                current_metric_data = exercise_data[
+                    (exercise_data['metric_name'] == metric) & 
+                    (exercise_data['limb'] == 'Trial')
+                ]
+                comp_metric_data = comparison_exercise_data[
+                    (comparison_exercise_data['metric_name'] == metric) & 
+                    (comparison_exercise_data['limb'] == 'Trial')
+                ]
+                
+                if not current_metric_data.empty:
+                    units = current_metric_data.iloc[0].get('units', '')
+                    current_best = current_metric_data['value'].max()
+                    
+                    if not comp_metric_data.empty:
+                        baseline_best = comp_metric_data['value'].max()
+                        change = current_best - baseline_best
+                        pct_change = ((current_best - baseline_best) / baseline_best) * 100 if baseline_best != 0 else 0
+                        
+                        comparison_table_data.append({
+                            'Metric': metric.replace('(Flight Time)', '').strip(),
+                            'Sept Best': f"{baseline_best:.2f} {units}",
+                            'Jan Best': f"{current_best:.2f} {units}",
+                            'Change': f"{change:+.2f}",
+                            '% Change': f"{pct_change:+.1f}%"
+                        })
+                    else:
+                        comparison_table_data.append({
+                            'Metric': metric.replace('(Flight Time)', '').strip(),
+                            'Sept Best': "N/A",
+                            'Jan Best': f"{current_best:.2f} {units}",
+                            'Change': "N/A",
+                            '% Change': "N/A"
+                        })
+            
+            if comparison_table_data:
+                comp_table_df = pd.DataFrame(comparison_table_data)
+                st.dataframe(comp_table_df, hide_index=True, use_container_width=True)
     
     # Show progression charts for each key metric
     if exercise_code == 'HJ':
@@ -1630,12 +1567,26 @@ def display_selected_exercise_analysis(perf_df, player_name, exercise_code, exer
     else:
         st.subheader("Performance Progression (Daily Max Values)")
     
+    # Get comparison exercise data for charts (for ALL exercise types including HJ)
+    comparison_exercise_data_for_charts = None
+    if comparison_perf_df is not None and not comparison_perf_df.empty:
+        comparison_perf_df_copy = comparison_perf_df.copy()
+        comparison_perf_df_copy['testType'] = comparison_perf_df_copy['testType'].replace('SLJ', 'SJ')
+        comparison_exercise_data_for_charts = comparison_perf_df_copy[comparison_perf_df_copy['testType'] == exercise_code].copy()
+        if not comparison_exercise_data_for_charts.empty:
+            comparison_exercise_data_for_charts['test_date'] = pd.to_datetime(comparison_exercise_data_for_charts['recordedUTC']).dt.date
+    
     for metric in matched_metrics:
         # Get data based on exercise type
         daily_data = get_daily_values_for_metric(exercise_data, metric, exercise_code)
         
         if daily_data.empty:
             continue
+        
+        # Get comparison data for this metric (for non-HJ)
+        comparison_daily_data = None
+        if comparison_exercise_data_for_charts is not None and not comparison_exercise_data_for_charts.empty and exercise_code != 'HJ':
+            comparison_daily_data = get_daily_values_for_metric(comparison_exercise_data_for_charts, metric, exercise_code)
         
         # Get units for labeling
         metric_sample = exercise_data[
@@ -1661,6 +1612,14 @@ def display_selected_exercise_analysis(perf_df, player_name, exercise_code, exer
                 (exercise_data['limb'] == 'Trial')
             ].copy()
             
+            # Get comparison data for HJ if available
+            comparison_metric_specific_data = None
+            if comparison_exercise_data_for_charts is not None and not comparison_exercise_data_for_charts.empty:
+                comparison_metric_specific_data = comparison_exercise_data_for_charts[
+                    (comparison_exercise_data_for_charts['metric_name'] == metric) & 
+                    (comparison_exercise_data_for_charts['limb'] == 'Trial')
+                ].copy()
+            
             if not metric_specific_data.empty:
                 repeats = metric_specific_data['repeat'].values
                 values = metric_specific_data['value'].values
@@ -1670,68 +1629,148 @@ def display_selected_exercise_analysis(perf_df, player_name, exercise_code, exer
                 repeats = repeats[sorted_indices]
                 values = values[sorted_indices]
                 
-                # Plot each repeat
+                # Plot comparison (September) data first if available
+                if comparison_metric_specific_data is not None and not comparison_metric_specific_data.empty:
+                    comp_repeats = comparison_metric_specific_data['repeat'].values
+                    comp_values = comparison_metric_specific_data['value'].values
+                    
+                    # Sort comparison data
+                    comp_sorted_indices = np.argsort(comp_repeats)
+                    comp_repeats = comp_repeats[comp_sorted_indices]
+                    comp_values = comp_values[comp_sorted_indices]
+                    
+                    # Plot comparison points (gray, smaller)
+                    ax.scatter(comp_repeats, comp_values, 
+                              s=100, color='#808080', edgecolors='white', linewidth=2, alpha=0.6, zorder=3, label='Sept 2025')
+                    
+                    # Connect comparison points with line
+                    ax.plot(comp_repeats, comp_values, color='#808080', linewidth=2, alpha=0.5, linestyle='--')
+                    
+                    # Add comparison average line
+                    comp_avg = np.mean(comp_values)
+                    ax.axhline(y=comp_avg, color='#808080', linestyle=':', alpha=0.5, linewidth=2, label=f'Sept Avg: {comp_avg:.1f}')
+                
+                # Plot current (January) data
                 ax.scatter(repeats, values, 
-                          s=150, color='#54342c', edgecolors='white', linewidth=3, alpha=0.8)
+                          s=150, color='#54342c', edgecolors='white', linewidth=3, alpha=0.9, zorder=4, label='Jan 2026')
                 
                 # Connect points with line
                 ax.plot(repeats, values, color='#54342c', linewidth=2, alpha=0.7)
                 
-                # Add value annotations
+                # Add value annotations for current data
                 for repeat_num, value in zip(repeats, values):
                     ax.annotate(f'{value:.1f}', 
                                (repeat_num, value),
                                textcoords="offset points", xytext=(0,15), ha='center',
                                color='white', fontsize=11, fontweight='bold')
                 
-                # Add average line for this metric
+                # Add current average line
                 avg_value = np.mean(values)
-                ax.axhline(y=avg_value, color='white', linestyle='--', alpha=0.7, linewidth=2, label=f'Average: {avg_value:.1f}')
+                ax.axhline(y=avg_value, color='white', linestyle='--', alpha=0.7, linewidth=2, label=f'Jan Avg: {avg_value:.1f}')
+                
+                # Calculate and display change if comparison data exists
+                if comparison_metric_specific_data is not None and not comparison_metric_specific_data.empty:
+                    comp_avg = np.mean(comp_values)
+                    change = avg_value - comp_avg
+                    pct_change = ((avg_value - comp_avg) / comp_avg) * 100 if comp_avg != 0 else 0
+                    
+                    change_color = '#00cc00' if change > 0 else '#ff4444' if change < 0 else 'white'
+                    change_text = f"Avg Change: {change:+.1f} ({pct_change:+.1f}%)"
+                    
+                    ax.text(0.5, 0.98, change_text, transform=ax.transAxes, 
+                            ha='center', verticalalignment='top', 
+                            bbox=dict(boxstyle='round,pad=0.5', facecolor='#1e1e1e', alpha=0.9, edgecolor=change_color),
+                            color=change_color, fontsize=12, fontweight='bold')
                 
                 ax.set_xlabel('Repeat Number', color='white', fontsize=14)
-                ax.set_title(f'{metric} - All Repeats', color='white', fontweight='bold', fontsize=16, pad=20)
-                ax.set_xticks(repeats)
-                ax.set_xticklabels([f'R{int(r)}' for r in repeats])
+                
+                # Update title based on whether we have comparison
+                if comparison_metric_specific_data is not None and not comparison_metric_specific_data.empty:
+                    ax.set_title(f'{metric} - Session Comparison', color='white', fontweight='bold', fontsize=16, pad=20)
+                else:
+                    ax.set_title(f'{metric} - All Repeats', color='white', fontweight='bold', fontsize=16, pad=20)
+                
+                # Use the larger set of repeats for x-ticks
+                all_repeats = set(repeats)
+                if comparison_metric_specific_data is not None and not comparison_metric_specific_data.empty:
+                    all_repeats = all_repeats.union(set(comp_repeats))
+                all_repeats = sorted(list(all_repeats))
+                
+                ax.set_xticks(all_repeats)
+                ax.set_xticklabels([f'R{int(r)}' for r in all_repeats])
             
         else:
-            # For other exercises, show daily max progression (unchanged)
-            if len(daily_data) >= 2:
-                ax.plot(daily_data['test_date'], daily_data['value'], 
-                       marker='o', linewidth=3, markersize=10, color='#54342c', 
-                       markerfacecolor='#54342c', markeredgecolor='white', markeredgewidth=2)
+            # For other exercises, show session comparison as bar/point chart
+            all_values = []
+            all_labels = []
+            all_colors = []
+            
+            # Add comparison (September) data first if available
+            if comparison_daily_data is not None and not comparison_daily_data.empty:
+                sept_best = comparison_daily_data['value'].max()
+                all_values.append(sept_best)
+                all_labels.append('Sept 2025')
+                all_colors.append('#808080')  # Gray for baseline
+            
+            # Add current (January) data
+            jan_best = daily_data['value'].max()
+            all_values.append(jan_best)
+            all_labels.append('Jan 2026')
+            all_colors.append('#54342c')  # Brown for current
+            
+            if len(all_values) >= 2:
+                # Create bar chart for comparison
+                x_positions = np.arange(len(all_labels))
+                bars = ax.bar(x_positions, all_values, color=all_colors, edgecolor='white', linewidth=2, width=0.6)
                 
-                # Add trend line if enough data points
-                if len(daily_data) >= 3:
-                    date_numeric = pd.to_datetime(daily_data['test_date']).map(pd.Timestamp.toordinal)
-                    z = np.polyfit(date_numeric, daily_data['value'], 1)
-                    p = np.poly1d(z)
-                    trend_values = p(date_numeric)
-                    
-                    ax.plot(daily_data['test_date'], trend_values, 
-                           "--", alpha=0.9, color='white', linewidth=2, label='Trend Line')
-                    
-                    trend_change = ((trend_values.iloc[-1] - trend_values.iloc[0]) / trend_values.iloc[0]) * 100
-                    trend_text = f"Trend: {trend_change:+.1f}%"
-                    
-                    ax.text(0.02, 0.98, trend_text, transform=ax.transAxes, 
-                            verticalalignment='top', bbox=dict(boxstyle='round,pad=0.5', facecolor='#54342c', alpha=0.8, edgecolor='white'),
-                            color='white', fontsize=12, fontweight='bold')
+                # Add value annotations on bars
+                for i, (bar, value, label) in enumerate(zip(bars, all_values, all_labels)):
+                    height = bar.get_height()
+                    ax.annotate(f'{value:.2f}', 
+                               (bar.get_x() + bar.get_width()/2, height),
+                               textcoords="offset points", xytext=(0, 10), ha='center',
+                               color='white', fontsize=12, fontweight='bold')
                 
-                ax.set_xlabel('Date', color='white', fontsize=14)
-                ax.set_title(f'{metric} - Daily Max Progression', color='white', fontweight='bold', fontsize=16, pad=20)
-                ax.tick_params(axis='x', rotation=45)
-            else:
-                # Single data point
-                test_date = daily_data.iloc[0]['test_date']
-                value = daily_data.iloc[0]['value']
-                ax.scatter([test_date], [value], 
-                          s=200, color='#54342c', edgecolors='white', linewidth=3, zorder=5)
-                ax.annotate(f'{value:.2f}', 
-                           (test_date, value),
-                           textcoords="offset points", xytext=(0,25), ha='center',
+                # Calculate and display improvement
+                baseline_best = all_values[0]
+                current_best = all_values[1]
+                change = current_best - baseline_best
+                pct_change = ((current_best - baseline_best) / baseline_best) * 100 if baseline_best != 0 else 0
+                
+                change_color = '#00cc00' if change > 0 else '#ff4444' if change < 0 else 'white'
+                change_text = f"Change: {change:+.2f} ({pct_change:+.1f}%)"
+                
+                ax.text(0.5, 0.95, change_text, transform=ax.transAxes, 
+                        ha='center', verticalalignment='top', 
+                        bbox=dict(boxstyle='round,pad=0.5', facecolor='#1e1e1e', alpha=0.9, edgecolor=change_color),
+                        color=change_color, fontsize=14, fontweight='bold')
+                
+                # Draw connecting line between bars to show trend
+                ax.plot([0, 1], [all_values[0], all_values[1]], 
+                       color='white', linestyle='--', linewidth=2, alpha=0.5, zorder=1)
+                
+                ax.set_xticks(x_positions)
+                ax.set_xticklabels(all_labels, fontsize=14)
+                ax.set_title(f'{metric} - Session Comparison', color='white', fontweight='bold', fontsize=16, pad=20)
+                
+                # Add some padding to y-axis
+                y_min = min(all_values) * 0.9
+                y_max = max(all_values) * 1.1
+                ax.set_ylim(y_min, y_max)
+                
+            elif len(all_values) == 1:
+                # Single data point - show as single bar
+                bars = ax.bar([0], all_values, color=all_colors, edgecolor='white', linewidth=2, width=0.4)
+                ax.annotate(f'{all_values[0]:.2f}', 
+                           (0, all_values[0]),
+                           textcoords="offset points", xytext=(0, 10), ha='center',
                            color='white', fontsize=12, fontweight='bold')
-                ax.set_xlabel('Date', color='white', fontsize=14)
-                ax.set_title(f'{metric} - Baseline Performance', color='white', fontweight='bold', fontsize=16, pad=20)
+                ax.set_xticks([0])
+                ax.set_xticklabels(all_labels, fontsize=14)
+                ax.set_title(f'{metric} - Current Performance', color='white', fontweight='bold', fontsize=16, pad=20)
+                
+                # Add padding to y-axis
+                ax.set_ylim(all_values[0] * 0.9, all_values[0] * 1.1)
         
         ax.set_ylabel(f'{metric} ({units})', color='white', fontsize=14)
         ax.grid(True, alpha=0.3, color='white', linestyle='-', linewidth=0.5)
@@ -1741,8 +1780,9 @@ def display_selected_exercise_analysis(perf_df, player_name, exercise_code, exer
         ax.spines['right'].set_color('white')
         ax.spines['left'].set_color('white')
         
-        if exercise_code == 'HJ' or (exercise_code != 'HJ' and len(daily_data) >= 3):
-            legend = ax.legend(loc='upper right', framealpha=0.9)
+        # Add legend for HJ
+        if exercise_code == 'HJ':
+            legend = ax.legend(loc='lower right', framealpha=0.9)
             legend.get_frame().set_facecolor('#1e1e1e')
             legend.get_frame().set_edgecolor('white')
             for text in legend.get_texts():
@@ -1753,20 +1793,18 @@ def display_selected_exercise_analysis(perf_df, player_name, exercise_code, exer
         plt.close()
         
         # Show improvement statistics for each metric - SKIP FOR HJ
-        if exercise_code != 'HJ':
-            # For other exercises, show improvement if multiple data points
-            if len(daily_data) >= 2:
-                first_value = daily_data.iloc[0]['value']
-                last_value = daily_data.iloc[-1]['value']
-                improvement = ((last_value - first_value) / first_value) * 100
-                
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Starting Best", f"{first_value:.2f} {units}")
-                with col2:
-                    st.metric("Current Best", f"{last_value:.2f} {units}")
-                with col3:
-                    st.metric("Improvement", f"{improvement:+.1f}%")
+        if exercise_code != 'HJ' and comparison_daily_data is not None and not comparison_daily_data.empty:
+            baseline_best = comparison_daily_data['value'].max()
+            current_best = daily_data['value'].max()
+            improvement = ((current_best - baseline_best) / baseline_best) * 100 if baseline_best != 0 else 0
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("September Best", f"{baseline_best:.2f} {units}")
+            with col2:
+                st.metric("January Best", f"{current_best:.2f} {units}")
+            with col3:
+                st.metric("Improvement", f"{improvement:+.1f}%")
         
         st.markdown("---")
     
@@ -1867,15 +1905,976 @@ def display_selected_exercise_analysis(perf_df, player_name, exercise_code, exer
     else:
         st.info("No trial data available for this exercise type")
 
-def biomechanics_display(player_name):
+def display_player_force_plate_section(player_name, current_session, comparison_session=None):
+    """Display Force Plate section for the selected player"""
+    
+    st.markdown('<h3 class="section-header">Force Plate Performance Analysis</h3>', unsafe_allow_html=True)
+    
+    # Initialize VALD profiles in session state if not done
+    if 'vald_profiles' not in st.session_state:
+        st.session_state.vald_profiles = {}
+    if 'vald_profiles_loaded' not in st.session_state:
+        st.session_state.vald_profiles_loaded = False
+    
+    # Load VALD profiles
+    if not st.session_state.vald_profiles_loaded:
+        with st.spinner("Loading VALD profiles..."):
+            st.session_state.vald_profiles = fetch_all_vald_profiles()
+            st.session_state.vald_profiles_loaded = True
+    
+    # Find player's VALD profile ID
+    player_profile_id = find_player_vald_profile_id(player_name, st.session_state.vald_profiles)
+    
+    if not player_profile_id:
+        st.warning(f"No VALD profile found for {player_name}")
+        
+        # Show available profiles for debugging
+        with st.expander("Available VALD Profiles (for debugging)", expanded=False):
+            profile_names = [profile['fullName'] for profile in st.session_state.vald_profiles.values()]
+            st.write(f"Found {len(profile_names)} profiles:")
+            for name in sorted(profile_names)[:20]:  # Show first 20
+                st.write(f"- {name}")
+        return
+    
+    st.success(f"Found VALD profile for {player_name}")
+    
+    # Date selection and exercise selection
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        # Set default date based on session
+        if current_session == "January 2026":
+            default_date = date(2026, 1, 18)
+        else:
+            default_date = date(2025, 9, 6)
+        
+        force_plate_date = st.date_input(
+            "Load Force Plate Data From:",
+            value=default_date,
+            min_value=date(2025, 9, 1),
+            max_value=date.today(),
+            key=f"fp_date_{player_name}_{current_session}"
+        )
+
+        load_fp_data = st.button("Load Data", type="primary", key=f"load_fp_{player_name}_{current_session}")
+    
+    with col2:
+        # Exercise selection
+        exercise_options = {
+            "CMJ Performance": "CMJ",
+            "Squat Jump Performance": "SJ", 
+            "Hop Jump Performance": "HJ",
+            "Plyo Pushup Performance": "PPU"
+        }
+        
+        selected_exercise = st.selectbox(
+            "Select Exercise Type:",
+            options=list(exercise_options.keys()),
+            key=f"exercise_select_{player_name}"
+        )
+        
+        exercise_code = exercise_options[selected_exercise]
+    
+    # Load Force Plate data
+    if load_fp_data:
+        team_id = get_vald_team_id()
+        
+        with st.spinner("Loading force plate data..."):
+            # Get test summaries for this specific player
+            df = fetch_player_forcedecks_tests(player_profile_id, force_plate_date.strftime('%Y-%m-%d'))
+            
+            if not df.empty:
+                st.success(f"Found {len(df)} tests for {player_name}")
+                
+                # Get trial data
+                test_ids = df['testId'].unique().tolist()
+                trials_df = fetch_test_trials_for_player(team_id, test_ids)
+                
+                if not trials_df.empty:
+                    # Extract performance metrics
+                    perf_df = extract_player_performance_metrics(trials_df, df)
+                    
+                    if not perf_df.empty:
+                        # Store in session state with session identifier
+                        st.session_state[f'fp_data_{player_name}_{current_session}'] = perf_df
+                        st.success(f"Loaded {len(perf_df)} performance measurements")
+                        
+                        # Also load comparison data if we're in January and comparison is enabled
+                        if comparison_session is not None:
+                            with st.spinner("Loading September baseline data for comparison..."):
+                                # Load September data (from Sept 6, 2025)
+                                sept_df = fetch_player_forcedecks_tests(player_profile_id, "2025-09-06")
+                                if not sept_df.empty:
+                                    sept_test_ids = sept_df['testId'].unique().tolist()
+                                    sept_trials_df = fetch_test_trials_for_player(team_id, sept_test_ids)
+                                    if not sept_trials_df.empty:
+                                        sept_perf_df = extract_player_performance_metrics(sept_trials_df, sept_df)
+                                        if not sept_perf_df.empty:
+                                            st.session_state[f'fp_data_{player_name}_comparison'] = sept_perf_df
+                                            st.success("Loaded September baseline data for comparison")
+                    else:
+                        st.error("No performance metrics extracted from trial data")
+                else:
+                    st.error("No trial data found")
+            else:
+                st.warning(f"No test data found for {player_name} from {force_plate_date}")
+    
+    # Display Force Plate data if available
+    if f'fp_data_{player_name}_{current_session}' in st.session_state:
+        perf_df = st.session_state[f'fp_data_{player_name}_{current_session}']
+        
+        # Get comparison data if available
+        comparison_perf_df = None
+        if comparison_session is not None and f'fp_data_{player_name}_comparison' in st.session_state:
+            comparison_perf_df = st.session_state[f'fp_data_{player_name}_comparison']
+        
+        display_selected_exercise_analysis(perf_df, player_name, exercise_code, selected_exercise, comparison_perf_df)
+
+def get_daily_values_for_metric(exercise_data, metric, exercise_code):
+    """Get daily values for a metric - all repeats for HJ, max for others"""
+    # Filter for the metric and trial limb only
+    metric_data = exercise_data[
+        (exercise_data['metric_name'] == metric) & 
+        (exercise_data['limb'] == 'Trial')
+    ].copy()
+    
+    if metric_data.empty:
+        return pd.DataFrame()
+    
+    if exercise_code == 'HJ':  # Hop Jump - show all repeat numbers
+        # For HJ, group by date and include all repeat numbers
+        daily_values = []
+        for date, group in metric_data.groupby('test_date'):
+            for _, row in group.iterrows():
+                daily_values.append({
+                    'test_date': date, 
+                    'value': row['value'],
+                    'repeat': row['repeat']
+                })
+        
+        return pd.DataFrame(daily_values) if daily_values else pd.DataFrame()
+    else:
+        # Other exercises - take max value per day (unchanged)
+        daily_max = metric_data.groupby('test_date')['value'].max().reset_index()
+        return daily_max.sort_values('test_date')
+
+def create_cmj_quadrant_analysis(exercise_data, player_name, comparison_exercise_data=None):
+    """Create a 2x2 quadrant analysis for CMJ data using E:C Ratio methodology with traditional grid"""
+    
+    # Filter for CMJ data and trial limb only
+    cmj_data = exercise_data[
+        (exercise_data['testType'] == 'CMJ') & 
+        (exercise_data['limb'] == 'Trial')
+    ].copy()
+    
+    if cmj_data.empty:
+        return None
+    
+    # CREATE THE test_date COLUMN HERE
+    cmj_data['test_date'] = pd.to_datetime(cmj_data['recordedUTC']).dt.date
+    
+    # Process comparison data if available
+    comparison_cmj_data = None
+    if comparison_exercise_data is not None and not comparison_exercise_data.empty:
+        comparison_cmj_data = comparison_exercise_data[
+            (comparison_exercise_data['testType'] == 'CMJ') & 
+            (comparison_exercise_data['limb'] == 'Trial')
+        ].copy()
+        if not comparison_cmj_data.empty:
+            comparison_cmj_data['test_date'] = pd.to_datetime(comparison_cmj_data['recordedUTC']).dt.date
+    
+    # Define the key metrics we need for E:C Ratio analysis
+    required_metrics = {
+        'concentric_impulse': ['Concentric Impulse'],
+        'eccentric_deceleration': ['Eccentric Deceleration Impulse'],
+        'eccentric_braking': ['Eccentric Braking Impulse']
+    }
+    
+    def extract_metrics_from_data(data_df):
+        """Helper function to extract metrics from a dataframe"""
+        metrics_data = {}
+        for category, metric_names in required_metrics.items():
+            for metric_name in metric_names:
+                matching_metrics = data_df[data_df['metric_name'] == metric_name]
+                if not matching_metrics.empty:
+                    daily_values = matching_metrics.groupby('test_date')['value'].max().reset_index()
+                    if len(daily_values) > 0:
+                        metrics_data[category] = {
+                            'values': daily_values['value'].values,
+                            'dates': daily_values['test_date'].values,
+                            'latest': daily_values['value'].iloc[-1],
+                            'mean': daily_values['value'].mean(),
+                            'metric_name': matching_metrics.iloc[0]['metric_name'],
+                            'units': matching_metrics.iloc[0].get('units', '')
+                        }
+                        break
+        return metrics_data
+    
+    # Extract current metrics
+    metrics_data = extract_metrics_from_data(cmj_data)
+    
+    # Extract comparison metrics if available
+    comparison_metrics_data = None
+    if comparison_cmj_data is not None and not comparison_cmj_data.empty:
+        comparison_metrics_data = extract_metrics_from_data(comparison_cmj_data)
+    
+    # Check if we have all required metrics for current data
+    if 'concentric_impulse' not in metrics_data:
+        st.warning("CMJ quadrant analysis requires Concentric Impulse metric")
+        return None
+        
+    if 'eccentric_deceleration' not in metrics_data or 'eccentric_braking' not in metrics_data:
+        st.warning("CMJ quadrant analysis requires both Eccentric Deceleration Impulse and Eccentric Braking Impulse metrics")
+        return None
+    
+    # Get the current data
+    concentric_data = metrics_data['concentric_impulse']
+    eccentric_decel_data = metrics_data['eccentric_deceleration']
+    eccentric_brake_data = metrics_data['eccentric_braking']
+    
+    # Match data points by date for current data
+    conc_df = pd.DataFrame({'date': concentric_data['dates'], 'concentric': concentric_data['values']})
+    ecc_decel_df = pd.DataFrame({'date': eccentric_decel_data['dates'], 'eccentric_decel': eccentric_decel_data['values']})
+    ecc_brake_df = pd.DataFrame({'date': eccentric_brake_data['dates'], 'eccentric_brake': eccentric_brake_data['values']})
+    
+    combined_df = pd.merge(conc_df, ecc_decel_df, on='date', how='inner')
+    combined_df = pd.merge(combined_df, ecc_brake_df, on='date', how='inner')
+    
+    if len(combined_df) == 0:
+        st.warning("No matching dates between Concentric, Eccentric Deceleration, and Eccentric Braking Impulse data")
+        return None
+    
+    # Calculate combined eccentric impulse and E:C Ratio for current data
+    combined_df['eccentric_total'] = combined_df['eccentric_decel'] + combined_df['eccentric_brake']
+    combined_df['ec_ratio'] = combined_df['eccentric_total'] / combined_df['concentric']
+    combined_df['session'] = 'Jan 2026'
+    
+    # Process comparison data if available
+    comparison_combined_df = None
+    if comparison_metrics_data is not None:
+        if all(key in comparison_metrics_data for key in ['concentric_impulse', 'eccentric_deceleration', 'eccentric_braking']):
+            comp_conc_data = comparison_metrics_data['concentric_impulse']
+            comp_ecc_decel_data = comparison_metrics_data['eccentric_deceleration']
+            comp_ecc_brake_data = comparison_metrics_data['eccentric_braking']
+            
+            comp_conc_df = pd.DataFrame({'date': comp_conc_data['dates'], 'concentric': comp_conc_data['values']})
+            comp_ecc_decel_df = pd.DataFrame({'date': comp_ecc_decel_data['dates'], 'eccentric_decel': comp_ecc_decel_data['values']})
+            comp_ecc_brake_df = pd.DataFrame({'date': comp_ecc_brake_data['dates'], 'eccentric_brake': comp_ecc_brake_data['values']})
+            
+            comparison_combined_df = pd.merge(comp_conc_df, comp_ecc_decel_df, on='date', how='inner')
+            comparison_combined_df = pd.merge(comparison_combined_df, comp_ecc_brake_df, on='date', how='inner')
+            
+            if len(comparison_combined_df) > 0:
+                comparison_combined_df['eccentric_total'] = comparison_combined_df['eccentric_decel'] + comparison_combined_df['eccentric_brake']
+                comparison_combined_df['ec_ratio'] = comparison_combined_df['eccentric_total'] / comparison_combined_df['concentric']
+                comparison_combined_df['session'] = 'Sept 2025'
+    
+    # Create the quadrant plot
+    plt.style.use('dark_background')
+    fig, ax = plt.subplots(figsize=(10, 10))
+    fig.patch.set_facecolor('#1e1e1e')
+    ax.set_facecolor('#1e1e1e')
+    
+    # Combine all data for axis scaling
+    all_x_values = list(combined_df['concentric'].values)
+    all_y_values = list(combined_df['eccentric_total'].values)
+    
+    if comparison_combined_df is not None and len(comparison_combined_df) > 0:
+        all_x_values.extend(list(comparison_combined_df['concentric'].values))
+        all_y_values.extend(list(comparison_combined_df['eccentric_total'].values))
+    
+    all_x_values = np.array(all_x_values)
+    all_y_values = np.array(all_y_values)
+    
+    # Create fixed grid lines at the center of the data range
+    x_center = (all_x_values.min() + all_x_values.max()) / 2
+    y_center = (all_y_values.min() + all_y_values.max()) / 2
+    
+    # Add quadrant grid lines
+    ax.axhline(y=y_center, color='white', linestyle='-', alpha=0.8, linewidth=2)
+    ax.axvline(x=x_center, color='white', linestyle='-', alpha=0.8, linewidth=2)
+    
+    # Plot comparison (September) data first if available
+    if comparison_combined_df is not None and len(comparison_combined_df) > 0:
+        for _, row in comparison_combined_df.iterrows():
+            x_val = row['concentric']
+            y_val = row['eccentric_total']
+            ec_ratio = row['ec_ratio']
+            date = row['date']
+            
+            # Determine color based on E:C ratio
+            if ec_ratio < 0.8:
+                color = 'orange'
+            elif ec_ratio > 1.2:
+                color = 'yellow'
+            else:
+                color = 'lightgreen'
+            
+            # Plot with gray edge to indicate baseline
+            ax.scatter(x_val, y_val, c=color, s=150, edgecolors='gray', linewidth=3, alpha=0.6, zorder=4)
+            ax.annotate(f'Sept\nE:C: {ec_ratio:.2f}', 
+                       (x_val, y_val), xytext=(-50, -30), textcoords='offset points',
+                       color='gray', fontsize=9, fontweight='bold',
+                       arrowprops=dict(arrowstyle='->', color='gray', alpha=0.5))
+    
+    # Plot current (January) data
+    for _, row in combined_df.iterrows():
+        x_val = row['concentric']
+        y_val = row['eccentric_total']
+        ec_ratio = row['ec_ratio']
+        date = row['date']
+        
+        # Determine color based on E:C ratio
+        if ec_ratio < 0.8:
+            color = 'orange'
+        elif ec_ratio > 1.2:
+            color = 'yellow'
+        else:
+            color = 'lightgreen'
+        
+        # Plot with white edge to indicate current
+        ax.scatter(x_val, y_val, c=color, s=200, edgecolors='white', linewidth=3, alpha=0.9, zorder=5)
+        ax.annotate(f'Jan\nE:C: {ec_ratio:.2f}', 
+                   (x_val, y_val), xytext=(15, 15), textcoords='offset points',
+                   color='white', fontsize=10, fontweight='bold')
+    
+    # Set axis limits with padding
+    x_range = all_x_values.max() - all_x_values.min()
+    y_range = all_y_values.max() - all_y_values.min()
+    
+    x_padding = max(x_range * 0.3, 30)
+    y_padding = max(y_range * 0.3, 30)
+    
+    ax.set_xlim(all_x_values.min() - x_padding, all_x_values.max() + x_padding)
+    ax.set_ylim(all_y_values.min() - y_padding, all_y_values.max() + y_padding)
+    
+    # Add quadrant labels
+    xlim = ax.get_xlim()
+    ylim = ax.get_ylim()
+    
+    x_left = xlim[0] + (x_center - xlim[0]) * 0.5
+    x_right = x_center + (xlim[1] - x_center) * 0.5
+    y_bottom = ylim[0] + (y_center - ylim[0]) * 0.5
+    y_top = y_center + (ylim[1] - y_center) * 0.5
+    
+    label_style = dict(boxstyle='round,pad=0.5', facecolor='black', alpha=0.7, edgecolor='white')
+    
+    ax.text(x_left, y_top, 'ECCENTRIC\nDEFICIENT', 
+            ha='center', va='center', color='yellow', fontsize=12, fontweight='bold',
+            bbox=label_style)
+    
+    ax.text(x_right, y_top, 'MAINTENANCE', 
+            ha='center', va='center', color='lightgreen', fontsize=12, fontweight='bold',
+            bbox=label_style)
+    
+    ax.text(x_left, y_bottom, 'LOW OVERALL\nCAPABILITY', 
+            ha='center', va='center', color='lightcoral', fontsize=12, fontweight='bold',
+            bbox=label_style)
+    
+    ax.text(x_right, y_bottom, 'CONCENTRIC\nDEFICIENT', 
+            ha='center', va='center', color='orange', fontsize=12, fontweight='bold',
+            bbox=label_style)
+    
+    # Customize the plot
+    ax.set_xlabel(f"Concentric Impulse ({concentric_data['units']})", color='white', fontsize=14, fontweight='bold')
+    ax.set_ylabel(f"Combined Eccentric Impulse ({eccentric_decel_data['units']})", color='white', fontsize=14, fontweight='bold')
+    ax.set_title(f'{player_name} - CMJ E:C Ratio Analysis', 
+                color='white', fontsize=16, fontweight='bold', pad=20)
+    
+    ax.tick_params(axis='both', colors='white', labelsize=12)
+    ax.spines['bottom'].set_color('white')
+    ax.spines['top'].set_color('white')
+    ax.spines['right'].set_color('white')
+    ax.spines['left'].set_color('white')
+    
+    ax.grid(True, alpha=0.3, color='white', linestyle=':', linewidth=0.5)
+    
+    # Add legend
+    from matplotlib.patches import Patch
+    from matplotlib.lines import Line2D
+    legend_elements = [
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=10, 
+               markeredgecolor='gray', markeredgewidth=2, label='September 2025', linestyle='None'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='white', markersize=10,
+               markeredgecolor='white', markeredgewidth=2, label='January 2026', linestyle='None'),
+    ]
+    ax.legend(handles=legend_elements, loc='lower left', framealpha=0.9)
+    
+    return fig
+
+def extract_player_dynamo_metrics(dynamo_df):
+    """Extract key metrics from Dynamo test data for a single player"""
+    if dynamo_df.empty:
+        return pd.DataFrame()
+    
+    performance_data = []
+    
+    for _, test in dynamo_df.iterrows():
+        # Construct test type name: bodyRegion + movement + position
+        test_type = f"{test.get('bodyRegion', '')} {test.get('movement', '')} - {test.get('position', '')}"
+        
+        # Get repetition summaries
+        rep_summaries = test.get('repetitionTypeSummaries', [])
+        
+        for rep in rep_summaries:
+            record = {
+                'testId': test.get('id'),
+                'test_date': test.get('test_date'),
+                'testCategory': test.get('testCategory'),
+                'bodyRegion': test.get('bodyRegion'),
+                'movement': test.get('movement'),
+                'position': test.get('position'),
+                'test_type': test_type,
+                'laterality': rep.get('laterality'),
+                'repCount': rep.get('repCount'),
+                'maxForceNewtons': rep.get('maxForceNewtons'),
+                'avgForceNewtons': rep.get('avgForceNewtons'),
+                'maxImpulseNewtonSeconds': rep.get('maxImpulseNewtonSeconds'),
+                'avgImpulseNewtonSeconds': rep.get('avgImpulseNewtonSeconds'),
+                'maxRateOfForceDevelopmentNewtonsPerSecond': rep.get('maxRateOfForceDevelopmentNewtonsPerSecond'),
+                'avgRateOfForceDevelopmentNewtonsPerSecond': rep.get('avgRateOfForceDevelopmentNewtonsPerSecond'),
+                'maxRangeOfMotionDegrees': rep.get('maxRangeOfMotionDegrees'),
+                'avgRangeOfMotionDegrees': rep.get('avgRangeOfMotionDegrees'),
+            }
+            performance_data.append(record)
+    
+    return pd.DataFrame(performance_data) if performance_data else pd.DataFrame()
+
+
+def display_player_rotational_analysis(player_name, profile_id):
+    
+    
+    st.markdown('<h3 class="section-header">Rotational Ability & Arm Care Analysis</h3>', unsafe_allow_html=True)
+    
+    if not profile_id:
+        st.warning(f"No VALD profile found for {player_name} - cannot load Dynamo data")
+        return
+    
+    # Date selection
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        dynamo_date = st.date_input(
+            "Load Dynamo Data From:",
+            value=date(2026, 1, 18),
+            min_value=date(2026, 1, 1),
+            max_value=date.today(),
+            key=f"dynamo_date_{player_name}"
+        )
+        load_dynamo = st.button("Load Rotational & Arm Care Data", type="primary", key=f"load_dynamo_{player_name}")
+    
+    # Load Dynamo data
+    if load_dynamo:
+        with st.spinner("Loading Dynamo data..."):
+            dynamo_df = fetch_player_dynamo_tests(profile_id, dynamo_date.strftime('%Y-%m-%d'))
+            
+            if not dynamo_df.empty:
+                dynamo_perf_df = extract_player_dynamo_metrics(dynamo_df)
+                
+                if not dynamo_perf_df.empty:
+                    st.session_state[f'dynamo_data_{player_name}'] = dynamo_perf_df
+                    st.success(f"Loaded {len(dynamo_perf_df)} Dynamo measurements for {player_name}")
+                else:
+                    st.warning("No performance metrics extracted from Dynamo data")
+            else:
+                st.warning(f"No Dynamo test data found for {player_name} from {dynamo_date}")
+    
+    # Display Dynamo data if available
+    if f'dynamo_data_{player_name}' in st.session_state:
+        dynamo_perf_df = st.session_state[f'dynamo_data_{player_name}']
+        display_player_dynamo_analysis(dynamo_perf_df, player_name)
+
+
+def display_player_dynamo_analysis(dynamo_perf_df, player_name, team_dynamo_df=None):
+    """Display comprehensive Dynamo analysis for a player"""
+    
+    if dynamo_perf_df.empty:
+        st.warning("No Dynamo data available")
+        return
+    
+    # Create tabs for different analysis views
+    tab1, tab2, tab3 = st.tabs(["Trunk Rotation", "Arm Care (ER/IR)", "All Tests Summary"])
+    
+    with tab1:
+        display_trunk_rotation_analysis(dynamo_perf_df, player_name)
+    
+    with tab2:
+        display_arm_care_analysis(dynamo_perf_df, player_name, team_dynamo_df)
+    
+    with tab3:
+        display_all_dynamo_tests(dynamo_perf_df, player_name)
+
+
+def display_trunk_rotation_analysis(dynamo_perf_df, player_name):
+    """Display trunk rotation analysis for a player"""
+    
+    # Filter for trunk rotation tests
+    trunk_data = dynamo_perf_df[
+        (dynamo_perf_df['bodyRegion'] == 'Trunk') & 
+        (dynamo_perf_df['movement'].str.contains('Rotation', case=False, na=False))
+    ].copy()
+    
+    if trunk_data.empty:
+        st.info("No Trunk Rotation data found for this player")
+        return
+    
+    st.subheader("Trunk Rotation Performance")
+    
+    # Get left and right values
+    left_data = trunk_data[trunk_data['laterality'] == 'LeftSide']
+    right_data = trunk_data[trunk_data['laterality'] == 'RightSide']
+    
+    # Key metrics
+    metrics_to_show = [
+        ('maxForceNewtons', 'Peak Force', 'N'),
+        ('avgForceNewtons', 'Avg Force', 'N'),
+        ('maxImpulseNewtonSeconds', 'Peak Impulse', 'N·s'),
+        ('maxRateOfForceDevelopmentNewtonsPerSecond', 'Peak RFD', 'N/s'),
+    ]
+    
+    # Summary metrics
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("Total Tests", len(trunk_data['testId'].unique()))
+    
+    with col2:
+        if not left_data.empty:
+            left_max = left_data['maxForceNewtons'].max()
+            st.metric("Left Peak Force", f"{left_max:.1f} N")
+        else:
+            st.metric("Left Peak Force", "N/A")
+    
+    with col3:
+        if not right_data.empty:
+            right_max = right_data['maxForceNewtons'].max()
+            st.metric("Right Peak Force", f"{right_max:.1f} N")
+        else:
+            st.metric("Right Peak Force", "N/A")
+    
+    # Asymmetry calculation
+    if not left_data.empty and not right_data.empty:
+        left_max = left_data['maxForceNewtons'].max()
+        right_max = right_data['maxForceNewtons'].max()
+        if left_max > 0 and right_max > 0:
+            asymmetry = abs(left_max - right_max) / max(left_max, right_max) * 100
+            dominant_side = "Left" if left_max > right_max else "Right"
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                # Color code asymmetry
+                if asymmetry > 15:
+                    st.error(f"⚠️ Asymmetry: {asymmetry:.1f}% - Significant imbalance")
+                elif asymmetry > 10:
+                    st.warning(f"Asymmetry: {asymmetry:.1f}% - Moderate imbalance")
+                else:
+                    st.success(f"Asymmetry: {asymmetry:.1f}% - Within normal range")
+            
+            with col2:
+                st.info(f"Dominant Side: {dominant_side}")
+    
+    # Create comparison chart
+    if not left_data.empty or not right_data.empty:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        fig.patch.set_facecolor('#1e1e1e')
+        ax.set_facecolor('#1e1e1e')
+        
+        metric_names = []
+        left_values = []
+        right_values = []
+        
+        for col, name, unit in metrics_to_show:
+            if col in trunk_data.columns:
+                metric_names.append(f"{name}\n({unit})")
+                left_val = left_data[col].max() if not left_data.empty and col in left_data.columns else 0
+                right_val = right_data[col].max() if not right_data.empty and col in right_data.columns else 0
+                left_values.append(left_val if pd.notna(left_val) else 0)
+                right_values.append(right_val if pd.notna(right_val) else 0)
+        
+        if metric_names:
+            x = np.arange(len(metric_names))
+            width = 0.35
+            
+            bars1 = ax.bar(x - width/2, left_values, width, label='Left', color='#4A90A4', alpha=0.8)
+            bars2 = ax.bar(x + width/2, right_values, width, label='Right', color='#54261A', alpha=0.8)
+            
+            ax.set_ylabel('Value', color='white', fontsize=12)
+            ax.set_title(f'{player_name} - Trunk Rotation: Left vs Right', color='white', fontsize=14, fontweight='bold')
+            ax.set_xticks(x)
+            ax.set_xticklabels(metric_names, color='white', fontsize=10)
+            ax.tick_params(colors='white')
+            ax.legend(facecolor='#1e1e1e', edgecolor='white', labelcolor='white')
+            ax.grid(True, alpha=0.3, axis='y')
+            
+            for spine in ax.spines.values():
+                spine.set_color('white')
+            
+            # Add value labels
+            for bar in bars1:
+                height = bar.get_height()
+                if height > 0:
+                    ax.text(bar.get_x() + bar.get_width()/2., height,
+                           f'{height:.0f}', ha='center', va='bottom', color='white', fontsize=9)
+            
+            for bar in bars2:
+                height = bar.get_height()
+                if height > 0:
+                    ax.text(bar.get_x() + bar.get_width()/2., height,
+                           f'{height:.0f}', ha='center', va='bottom', color='white', fontsize=9)
+            
+            plt.tight_layout()
+            st.pyplot(fig)
+            plt.close()
+    
+    # Training recommendations
+    if not left_data.empty and not right_data.empty:
+        left_max = left_data['maxForceNewtons'].max()
+        right_max = right_data['maxForceNewtons'].max()
+        asymmetry = abs(left_max - right_max) / max(left_max, right_max) * 100 if max(left_max, right_max) > 0 else 0
+        
+        st.markdown("---")
+        st.markdown("### Training Recommendations")
+        
+        if asymmetry > 15:
+            weaker_side = "Left" if left_max < right_max else "Right"
+            st.markdown(f"""
+            **Significant Rotational Asymmetry Detected ({asymmetry:.1f}%)**
+            
+            - Focus on **unilateral rotational exercises** to strengthen the {weaker_side} side
+            - Implement **anti-rotation holds** (Pallof press variations)
+            - Address potential **hip or thoracic mobility restrictions** on the weaker side
+            - Consider **manual therapy** assessment for tissue quality imbalances
+            - **Monitor closely** - asymmetry >15% may increase injury risk for pitchers
+            """)
+        elif asymmetry > 10:
+            st.markdown(f"""
+            **Moderate Rotational Asymmetry ({asymmetry:.1f}%)**
+            
+            - Include **bilateral rotational training** with slight emphasis on weaker side
+            - Maintain **mobility work** for thoracic spine and hips
+            - Continue monitoring asymmetry over time
+            """)
+        else:
+            st.markdown(f"""
+            **Good Rotational Balance ({asymmetry:.1f}%)**
+            
+            - Continue **balanced rotational training** program
+            - Focus on **progressive overload** for continued development
+            - Maintain current mobility and stability work
+            """)
+
+
+def display_arm_care_analysis(dynamo_perf_df, player_name, team_dynamo_df=None):
+    """Display arm care analysis (ER/IR ratio) for a player - research-informed approach"""
+    
+    # Filter for shoulder internal and external rotation tests
+    shoulder_data = dynamo_perf_df[dynamo_perf_df['bodyRegion'] == 'Shoulder'].copy()
+    
+    if shoulder_data.empty:
+        st.info("No shoulder data found for this player")
+        return
+    
+    er_data = shoulder_data[shoulder_data['movement'].str.contains('ExternalRotation', case=False, na=False)]
+    ir_data = shoulder_data[shoulder_data['movement'].str.contains('InternalRotation', case=False, na=False)]
+    
+    st.subheader("Arm Care Analysis (Shoulder ER/IR)")
+    
+    if er_data.empty and ir_data.empty:
+        st.info("No External/Internal Rotation data found")
+        
+        # Show what shoulder tests ARE available
+        available_movements = shoulder_data['movement'].unique()
+        if len(available_movements) > 0:
+            st.write("Available shoulder tests:", list(available_movements))
+        return
+    
+    # Summary metrics
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        er_count = len(er_data['testId'].unique()) if not er_data.empty else 0
+        st.metric("ER Tests", er_count)
+    
+    with col2:
+        ir_count = len(ir_data['testId'].unique()) if not ir_data.empty else 0
+        st.metric("IR Tests", ir_count)
+    
+    with col3:
+        if not er_data.empty:
+            er_max = er_data['maxForceNewtons'].max()
+            st.metric("ER Peak Force", f"{er_max:.1f} N")
+        else:
+            st.metric("ER Peak Force", "N/A")
+    
+    with col4:
+        if not ir_data.empty:
+            ir_max = ir_data['maxForceNewtons'].max()
+            st.metric("IR Peak Force", f"{ir_max:.1f} N")
+        else:
+            st.metric("IR Peak Force", "N/A")
+    
+    # Calculate ER/IR Ratio
+    if not er_data.empty and not ir_data.empty:
+        er_max = er_data['maxForceNewtons'].max()
+        ir_max = ir_data['maxForceNewtons'].max()
+        
+        if ir_max > 0:
+            er_ir_ratio = er_max / ir_max
+            
+            st.markdown("---")
+            st.subheader("ER/IR Ratio Analysis")
+            
+            # Calculate team median if team data is available
+            team_median_ratio = None
+            team_median_er = None
+            team_median_ir = None
+            
+            if team_dynamo_df is not None and not team_dynamo_df.empty:
+                team_shoulder = team_dynamo_df[team_dynamo_df['bodyRegion'] == 'Shoulder'].copy()
+                team_er = team_shoulder[team_shoulder['movement'].str.contains('ExternalRotation', case=False, na=False)]
+                team_ir = team_shoulder[team_shoulder['movement'].str.contains('InternalRotation', case=False, na=False)]
+                
+                if not team_er.empty and not team_ir.empty:
+                    # Get best ER and IR per player
+                    player_er_best = team_er.groupby('athleteId')['maxForceNewtons'].max()
+                    player_ir_best = team_ir.groupby('athleteId')['maxForceNewtons'].max()
+                    
+                    # Calculate ratio for each player who has both
+                    common_players = player_er_best.index.intersection(player_ir_best.index)
+                    if len(common_players) > 0:
+                        player_ratios = player_er_best[common_players] / player_ir_best[common_players]
+                        team_median_ratio = player_ratios.median()
+                        team_median_er = player_er_best.median()
+                        team_median_ir = player_ir_best.median()
+            
+            # Display metrics with team comparison
+            if team_median_ratio is not None:
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    vs_median = ((er_ir_ratio - team_median_ratio) / team_median_ratio) * 100
+                    st.metric("ER/IR Ratio", f"{er_ir_ratio:.2f}", f"{vs_median:+.1f}% vs team median")
+                
+                with col2:
+                    er_vs_median = ((er_max - team_median_er) / team_median_er) * 100
+                    st.metric("ER vs Team Median", f"{er_max:.1f} N", f"{er_vs_median:+.1f}%")
+                
+                with col3:
+                    ir_vs_median = ((ir_max - team_median_ir) / team_median_ir) * 100
+                    st.metric("IR vs Team Median", f"{ir_max:.1f} N", f"{ir_vs_median:+.1f}%")
+            else:
+                st.metric("ER/IR Ratio", f"{er_ir_ratio:.2f}")
+            
+            # Research-informed interpretation
+            st.markdown(f"""
+            **Interpretation (Isometric Testing):**
+            
+            Research on isometric handheld dynamometry in baseball players shows:
+            - Professional pitcher throwing arm average: ~0.75-0.83
+            - Non-throwing arm average: ~0.99
+            - Ratios <0.70 may indicate increased injury risk
+            - Ratios near 1.0 suggest balanced strength
+            """)
+            
+            # Create larger comparison chart (full width)
+            fig = create_er_ir_comparison_chart(er_max, ir_max, er_ir_ratio, player_name, 
+                                                team_median_ratio, team_median_er, team_median_ir)
+            st.pyplot(fig)
+            plt.close()
+    
+    # Left vs Right comparison for ER and IR
+    st.markdown("---")
+    st.subheader("Left vs Right Shoulder Comparison")
+    
+    # Create comparison data
+    comparison_data = []
+    
+    for movement, data, label in [('ExternalRotation', er_data, 'External Rotation'), 
+                                   ('InternalRotation', ir_data, 'Internal Rotation')]:
+        if not data.empty:
+            left = data[data['laterality'] == 'LeftSide']['maxForceNewtons'].max()
+            right = data[data['laterality'] == 'RightSide']['maxForceNewtons'].max()
+            
+            if pd.notna(left) and pd.notna(right) and left > 0 and right > 0:
+                asymmetry = abs(left - right) / max(left, right) * 100
+                comparison_data.append({
+                    'Movement': label,
+                    'Left (N)': round(left, 1),
+                    'Right (N)': round(right, 1),
+                    'Asymmetry (%)': round(asymmetry, 1),
+                    'Dominant': 'Left' if left > right else 'Right'
+                })
+    
+    if comparison_data:
+        comparison_df = pd.DataFrame(comparison_data)
+        st.dataframe(comparison_df, use_container_width=True, hide_index=True)
+        
+        # Flag significant asymmetries
+        for _, row in comparison_df.iterrows():
+            if row['Asymmetry (%)'] > 15:
+                st.error(f"⚠️ {row['Movement']}: {row['Asymmetry (%)']:.1f}% asymmetry - significant imbalance")
+            elif row['Asymmetry (%)'] > 10:
+                st.warning(f"⚠️ {row['Movement']}: {row['Asymmetry (%)']:.1f}% asymmetry - monitor closely")
+
+
+def create_er_ir_comparison_chart(er_value, ir_value, ratio, player_name, 
+                                   team_median_ratio=None, team_median_er=None, team_median_ir=None):
+    """Create a research-informed comparison chart with team median reference"""
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    fig.patch.set_facecolor('#1e1e1e')
+    
+    # Left panel: Bar comparison with team median
+    ax1.set_facecolor('#1e1e1e')
+    
+    x = np.arange(2)
+    width = 0.35
+    
+    # Player bars
+    player_bars = ax1.bar(x - width/2, [er_value, ir_value], width, 
+                          label=player_name, color=['#4A90A4', '#54261A'], 
+                          alpha=0.9, edgecolor='white', linewidth=2)
+    
+    # Team median bars (if available)
+    if team_median_er is not None and team_median_ir is not None:
+        median_bars = ax1.bar(x + width/2, [team_median_er, team_median_ir], width,
+                              label='Team Median', color=['#4A90A4', '#54261A'], 
+                              alpha=0.4, edgecolor='white', linewidth=2, hatch='//')
+    
+    # Add value labels on player bars
+    for bar, val in zip(player_bars, [er_value, ir_value]):
+        ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 2,
+                f'{val:.1f} N', ha='center', va='bottom', 
+                color='white', fontsize=12, fontweight='bold')
+    
+    # Add value labels on team median bars
+    if team_median_er is not None and team_median_ir is not None:
+        for bar, val in zip(median_bars, [team_median_er, team_median_ir]):
+            ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 2,
+                    f'{val:.1f}', ha='center', va='bottom', 
+                    color='gray', fontsize=10)
+    
+    ax1.set_ylabel('Peak Force (Newtons)', color='white', fontsize=12)
+    ax1.set_title('Rotator Strength vs Team', color='white', fontsize=14, fontweight='bold')
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(['External\nRotation', 'Internal\nRotation'], color='white', fontsize=11)
+    ax1.tick_params(colors='white')
+    for spine in ax1.spines.values():
+        spine.set_color('white')
+    ax1.set_ylim(0, max(er_value, ir_value, team_median_er or 0, team_median_ir or 0) * 1.25)
+    
+    # Add legend
+    if team_median_er is not None:
+        legend = ax1.legend(loc='upper right', facecolor='#1e1e1e', edgecolor='white', labelcolor='white')
+    
+    # Right panel: Ratio with research context and team median
+    ax2.set_facecolor('#1e1e1e')
+    
+    # Show ratio as indicator with research reference ranges
+    ax2.barh(['This Player'], [ratio], height=0.3, color='#54261A', alpha=0.9, edgecolor='white', linewidth=2)
+    
+    # Add reference lines from research
+    ax2.axvline(x=0.70, color='#FFD700', linestyle='--', linewidth=2, alpha=0.8)
+    ax2.axvline(x=0.83, color='#00CED1', linestyle='--', linewidth=2, alpha=0.8)
+    ax2.axvline(x=1.0, color='white', linestyle=':', linewidth=2, alpha=0.5)
+    
+    # Add team median line if available
+    if team_median_ratio is not None:
+        ax2.axvline(x=team_median_ratio, color='#32CD32', linestyle='-', linewidth=3, alpha=0.9)
+        ax2.text(team_median_ratio, 0.55, f'Team\nMedian\n({team_median_ratio:.2f})', ha='center', va='bottom', 
+                color='#32CD32', fontsize=10, fontweight='bold')
+    
+    # Add reference labels at top
+    ax2.text(0.70, 0.55, 'Injury Risk\nThreshold\n(0.70)', ha='center', va='bottom', 
+            color='#FFD700', fontsize=9, fontweight='bold')
+    ax2.text(0.83, 0.55, 'Pro Pitcher\nAvg\n(0.83)', ha='center', va='bottom', 
+            color='#00CED1', fontsize=9, fontweight='bold')
+    ax2.text(1.0, 0.55, 'Balanced\n(1.0)', ha='center', va='bottom', 
+            color='white', fontsize=9, alpha=0.7)
+    
+    # Add ratio value label
+    label_x = min(ratio + 0.04, 1.25)
+    ax2.text(label_x, 0, f'{ratio:.2f}', ha='left', va='center',
+            color='white', fontsize=18, fontweight='bold')
+    
+    # Add marker for the ratio value
+    ax2.plot(ratio, 0, marker='D', markersize=14, color='white', zorder=10)
+    
+    ax2.set_xlim(0.4, 1.35)
+    ax2.set_ylim(-0.4, 0.9)
+    ax2.set_xlabel('ER/IR Ratio', color='white', fontsize=12)
+    ax2.set_title('Ratio vs Research & Team References', color='white', fontsize=14, fontweight='bold')
+    ax2.tick_params(colors='white', labelleft=False)
+    ax2.set_yticks([])
+    for spine in ax2.spines.values():
+        spine.set_color('white')
+    
+    plt.suptitle(f'{player_name} - Shoulder ER/IR Analysis', 
+                color='white', fontsize=16, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    
+    return fig
+
+
+def display_all_dynamo_tests(dynamo_perf_df, player_name):
+    """Display summary of all Dynamo tests for a player"""
+    
+    st.subheader(f"All Dynamo Tests for {player_name}")
+    
+    # Group by test type
+    test_summary = dynamo_perf_df.groupby(['bodyRegion', 'movement', 'position']).agg({
+        'testId': 'nunique',
+        'maxForceNewtons': 'max',
+        'avgForceNewtons': 'mean',
+        'test_date': ['min', 'max']
+    }).reset_index()
+    
+    # Flatten column names
+    test_summary.columns = ['Body Region', 'Movement', 'Position', 'Test Count', 
+                           'Peak Force (N)', 'Avg Force (N)', 'First Test', 'Last Test']
+    
+    # Round numeric columns
+    test_summary['Peak Force (N)'] = test_summary['Peak Force (N)'].round(1)
+    test_summary['Avg Force (N)'] = test_summary['Avg Force (N)'].round(1)
+    
+    st.dataframe(test_summary, use_container_width=True, hide_index=True)
+    
+    # Show test distribution by body region
+    st.markdown("---")
+    st.subheader("Test Distribution by Body Region")
+    
+    region_counts = dynamo_perf_df.groupby('bodyRegion')['testId'].nunique().reset_index()
+    region_counts.columns = ['Body Region', 'Test Count']
+    
+    fig, ax = plt.subplots(figsize=(8, 4))
+    fig.patch.set_facecolor('#1e1e1e')
+    ax.set_facecolor('#1e1e1e')
+    
+    bars = ax.bar(region_counts['Body Region'], region_counts['Test Count'], 
+                  color='#54261A', alpha=0.8, edgecolor='white')
+    
+    ax.set_ylabel('Number of Tests', color='white')
+    ax.set_title(f'{player_name} - Tests by Body Region', color='white', fontweight='bold')
+    ax.tick_params(colors='white')
+    
+    for bar in bars:
+        height = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width()/2., height,
+               f'{int(height)}', ha='center', va='bottom', color='white', fontweight='bold')
+    
+    for spine in ax.spines.values():
+        spine.set_color('white')
+    
+    plt.tight_layout()
+    st.pyplot(fig)
+    plt.close()
+
+def biomechanics_display(player_name, biomech_dir):
     """Display biomechanical chart for the selected player."""
     st.subheader("Kinematics Sequence & Key Metrics Chart Display:")
     
     # Format player name to match filename convention
     formatted_name = player_name.replace(" ", "")
-    
-    # Path to the biomech reports directory
-    biomech_dir = os.path.join("data", "Biomech Reports")
     
     if not os.path.exists(biomech_dir):
         st.error("Biomechanics Reports directory not found")
@@ -1917,22 +2916,26 @@ def biomechanics_display(player_name):
     else:
         st.warning(f"No biomechanical chart found for {player_name}")
 
-def display_player_assessment_data(player_name):
-    """Display the specific player's assessment data with outlier highlighting."""
+def display_player_assessment_data(player_name, assessment_file, comparison_file=None):
+    """Display the specific player's assessment data with outlier highlighting and session comparison."""
     st.markdown('<h3 class="section-header">Player Assessment Data</h3>', unsafe_allow_html=True)
     
-    excel_file_path = os.path.join("data", "BonniesBaseballTableAssessment.xlsx")
-    
-    if not os.path.exists(excel_file_path):
-        st.error("Assessment table file not found at data/BonniesBaseballTableAssessment.xlsx")
+    if not os.path.exists(assessment_file):
+        st.error(f"Assessment table file not found at {assessment_file}")
         return
     
     try:
         # Read the Excel file - get all columns now (A through AC)
-        df = pd.read_excel(excel_file_path, engine='openpyxl')
+        df = pd.read_excel(assessment_file, engine='openpyxl')
         
         # Clean up the dataframe
         df = df.dropna(how='all')
+        
+        # Load comparison data if provided (for January vs September comparison)
+        comparison_df = None
+        if comparison_file and os.path.exists(comparison_file):
+            comparison_df = pd.read_excel(comparison_file, engine='openpyxl')
+            comparison_df = comparison_df.dropna(how='all')
         
         # Split the selected player name to get first and last name
         name_parts = player_name.split()
@@ -1967,8 +2970,22 @@ def display_player_assessment_data(player_name):
             st.error("Could not find 'First Name' and 'Last Name' columns in the assessment table")
             return
         
+        # Find comparison row if comparison data exists
+        comparison_row = None
+        if comparison_df is not None and 'First Name' in comparison_df.columns and 'Last Name' in comparison_df.columns:
+            comp_match = comparison_df[
+                (comparison_df['First Name'].str.strip().str.lower() == first_name.lower()) & 
+                (comparison_df['Last Name'].str.strip().str.lower() == last_name.lower())
+            ]
+            if not comp_match.empty:
+                comparison_row = comp_match.iloc[0]
+        
         if player_row is not None:
             st.success(f"Found assessment data for {player_name}")
+            
+            # Show comparison indicator if we have baseline data
+            if comparison_row is not None:
+                st.info("Showing changes vs September 2025 baseline. Green delta = improvement, Red delta = decline.")
             
             # Calculate statistics for numeric columns (for the entire team)
             assessment_columns = df.columns[:22] if len(df.columns) >= 22 else df.columns
@@ -2028,14 +3045,31 @@ def display_player_assessment_data(player_name):
                         except (ValueError, TypeError):
                             pass
                     
+                    # Calculate delta if comparison data exists
+                    delta = None
+                    if comparison_row is not None and column in comparison_row.index:
+                        try:
+                            current_val = float(value)
+                            previous_val = float(comparison_row[column])
+                            if pd.notna(previous_val):
+                                delta = current_val - previous_val
+                        except (ValueError, TypeError):
+                            delta = None
+                    
                     with cols[col_idx % 4]:
                         if is_outlier:
+                            # For outliers, show custom styled boxes with delta info if available
+                            delta_text = ""
+                            if delta is not None:
+                                delta_text = f"<div style='font-size: 0.7em; margin-top: 3px;'>Change: {delta:+.1f}</div>"
+                            
                             if outlier_type == 'low':
                                 st.markdown(f"""
                                 <div style='background-color: #cc0000; color: white; padding: 10px; border-radius: 5px; font-weight: bold; text-align: center;'>
                                     <div style='font-size: 0.8em; margin-bottom: 5px;'>{column}</div>
                                     <div style='font-size: 1.5em;'>{value}</div>
                                     <div style='font-size: 0.7em; margin-top: 5px;'>Mobility Deficiency</div>
+                                    {delta_text}
                                 </div>
                                 """, unsafe_allow_html=True)
                             else:  # high
@@ -2044,10 +3078,15 @@ def display_player_assessment_data(player_name):
                                     <div style='font-size: 0.8em; margin-bottom: 5px;'>{column}</div>
                                     <div style='font-size: 1.5em;'>{value}</div>
                                     <div style='font-size: 0.7em; margin-top: 5px;'>Hyper Mobility</div>
+                                    {delta_text}
                                 </div>
                                 """, unsafe_allow_html=True)
                         else:
-                            st.metric(column, str(value))
+                            # For normal metrics, use st.metric with delta
+                            if delta is not None:
+                                st.metric(column, str(value), delta=f"{delta:+.1f}")
+                            else:
+                                st.metric(column, str(value))
                     
                     col_idx += 1
                     
@@ -2131,17 +3170,6 @@ def main():
     st.markdown('<h1 class="main-header">St. Bonaventure Baseball</h1>', unsafe_allow_html=True)
     st.markdown('<p class="sub-header"> Total Player Profile Display </p>', unsafe_allow_html=True)
     
-    # Load all player data
-    try:
-        all_players = load_all_player_data()
-    except Exception as e:
-        st.error(f"Failed to load player data: {str(e)}")
-        st.stop()
-    
-    if not all_players:
-        st.error("No player data found. Please check your data directory.")
-        st.stop()
-    
     # Sidebar with logo
     try:
         st.sidebar.image("images/liquid_logo.png", width=250)
@@ -2149,8 +3177,39 @@ def main():
     except FileNotFoundError:
         st.sidebar.warning("Logo not found at images/logo.png")
     
-    st.sidebar.title("Player Selection")
+    st.sidebar.title("Data Selection")
     st.sidebar.markdown("---")
+    
+    # Session selector
+    selected_session = st.sidebar.selectbox(
+        "Select Data Collection Period",
+        list(SESSION_CONFIG.keys()),
+        index=1  # Default to January 2026
+    )
+    
+    # Get current session config
+    current_config = SESSION_CONFIG[selected_session]
+    
+    # Determine if we should show comparisons (only for January data)
+    show_comparison = selected_session == "January 2026"
+    comparison_config = SESSION_CONFIG["September 2025"] if show_comparison else None
+    
+    if show_comparison:
+        st.sidebar.info("Showing changes vs September 2025 baseline")
+    
+    st.sidebar.markdown("---")
+    st.sidebar.title("Player Selection")
+    
+    # Load all player data using current session's directory
+    try:
+        all_players = load_all_player_data(current_config["bullpen_dir"])
+    except Exception as e:
+        st.error(f"Failed to load player data: {str(e)}")
+        st.stop()
+    
+    if not all_players:
+        st.error(f"No player data found in {current_config['bullpen_dir']}. Please check your data directory.")
+        st.stop()
     
     # Player selector
     player_names = sorted(all_players.keys())
@@ -2161,8 +3220,8 @@ def main():
         pitch_data = player_data['pitch_data']
         handedness = player_data['handedness']
         
-        # Player header
-        st.markdown(f'<h2 class="player-header">{selected_player} ({handedness})</h2>', unsafe_allow_html=True)
+        # Player header with session indicator
+        st.markdown(f'<h2 class="player-header">{selected_player} ({handedness}) - {selected_session}</h2>', unsafe_allow_html=True)
         
         # Calculate Stuff+ for each pitch type
         pitch_stuff = calculate_player_stuff_plus(pitch_data)
@@ -2170,6 +3229,17 @@ def main():
         if not pitch_stuff:
             st.warning("No pitch types with sufficient data (minimum 3 pitches) for Stuff+ calculation.")
             st.stop()
+        
+        # Load comparison data if viewing January
+        comparison_pitch_stuff = None
+        if show_comparison:
+            try:
+                comparison_players = load_all_player_data(comparison_config["bullpen_dir"])
+                if selected_player in comparison_players:
+                    comparison_pitch_data = comparison_players[selected_player]['pitch_data']
+                    comparison_pitch_stuff = calculate_player_stuff_plus(comparison_pitch_data)
+            except Exception:
+                comparison_pitch_stuff = None
         
         # Overall Stuff+ Summary
         st.markdown('<h3 class="section-header">Bonnies Stuff+ Overview</h3>', unsafe_allow_html=True)
@@ -2179,10 +3249,19 @@ def main():
         total_pitches = sum([data['count'] for data in pitch_stuff.values()])
         pitch_types_count = len(pitch_stuff)
         
+        # Calculate comparison values if available
+        comparison_overall = None
+        if comparison_pitch_stuff:
+            comparison_overall = np.mean([data['stuff_plus'] for data in comparison_pitch_stuff.values()])
+        
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            st.metric("Overall Stuff+", f"{overall_stuff_plus:.1f}")
+            if comparison_overall is not None:
+                delta = overall_stuff_plus - comparison_overall
+                st.metric("Overall Stuff+", f"{overall_stuff_plus:.1f}", delta=f"{delta:+.1f}")
+            else:
+                st.metric("Overall Stuff+", f"{overall_stuff_plus:.1f}")
         
         with col2:
             st.metric("Pitch Types", f"{pitch_types_count}")
@@ -2207,6 +3286,105 @@ def main():
             bar_chart = create_stuff_plus_bar_chart(pitch_stuff, selected_player)
             if bar_chart:
                 st.pyplot(bar_chart)
+        
+        # Stuff+ Comparison Section (only for January view with comparison data)
+        if show_comparison and comparison_pitch_stuff:
+            st.markdown('<h3 class="section-header">Stuff+ Progress vs September Baseline</h3>', unsafe_allow_html=True)
+    
+            comparison_data = []
+            all_pitch_types = set(list(pitch_stuff.keys()) + list(comparison_pitch_stuff.keys()))
+        
+            for pitch_type in all_pitch_types:
+                current = pitch_stuff.get(pitch_type, {})
+                baseline = comparison_pitch_stuff.get(pitch_type, {})
+                
+                current_stuff = current.get('stuff_plus', None)
+                baseline_stuff = baseline.get('stuff_plus', None)
+                
+                current_velo = current.get('avg_velocity', None)
+                baseline_velo = baseline.get('avg_velocity', None)
+                
+                stuff_change = None
+                if current_stuff is not None and baseline_stuff is not None:
+                    stuff_change = current_stuff - baseline_stuff
+                
+                velo_change = None
+                if current_velo is not None and baseline_velo is not None:
+                    velo_change = current_velo - baseline_velo
+                
+                comparison_data.append({
+                    'Pitch Type': pitch_type,
+                    'Sept Stuff+': baseline_stuff,
+                    'Jan Stuff+': current_stuff,
+                    'Stuff+ Change': stuff_change,
+                    'Velo Change': velo_change
+                })
+            
+            if comparison_data:
+                comp_df = pd.DataFrame(comparison_data)
+                
+                # Define color styling function
+                def color_change(val):
+                    if pd.isna(val) or val is None:
+                        return ''
+                    elif val > 0:
+                        return 'color: #00cc00'  # Green for positive
+                    elif val < 0:
+                        return 'color: #ff4444'  # Red for negative
+                    else:
+                        return ''
+                
+                # Define formatting function
+                def format_stuff_change(val):
+                    if pd.isna(val) or val is None:
+                        return 'N/A'
+                    return f"{val:+.1f}"
+                
+                def format_velo_change(val):
+                    if pd.isna(val) or val is None:
+                        return 'N/A'
+                    return f"{val:+.1f} mph"
+                
+                def format_stuff(val):
+                    if pd.isna(val) or val is None:
+                        return 'N/A'
+                    return f"{val:.1f}"
+                
+                # Apply styling
+                styled_df = comp_df.style.applymap(
+                    color_change, 
+                    subset=['Stuff+ Change', 'Velo Change']
+                ).format({
+                    'Sept Stuff+': format_stuff,
+                    'Jan Stuff+': format_stuff,
+                    'Stuff+ Change': format_stuff_change,
+                    'Velo Change': format_velo_change
+                })
+                
+                st.dataframe(styled_df, hide_index=True, use_container_width=True)
+                
+                # Summary metrics (filter out None values for calculations)
+                valid_stuff_changes = [row['Stuff+ Change'] for row in comparison_data 
+                                    if row['Stuff+ Change'] is not None]
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    improvements = sum(1 for val in valid_stuff_changes if val > 0)
+                    st.metric("Pitches Improved", f"{improvements}/{len(valid_stuff_changes)}")
+                
+                with col2:
+                    if valid_stuff_changes:
+                        avg_change = np.mean(valid_stuff_changes)
+                        st.metric("Avg Stuff+ Change", f"{avg_change:+.1f}")
+                
+                with col3:
+                    if valid_stuff_changes:
+                        best_idx = np.argmax(valid_stuff_changes)
+                        best_pitch_type = [row['Pitch Type'] for row in comparison_data 
+                                        if row['Stuff+ Change'] is not None][best_idx]
+                        best_value = max(valid_stuff_changes)
+                        st.metric("Most Improved", f"{best_pitch_type} ({best_value:+.1f})")
         
         # Detailed pitch analysis tabs
         st.markdown('<h3 class="section-header">Detailed Pitch Analysis</h3>', unsafe_allow_html=True)
@@ -2233,8 +3411,15 @@ def main():
                 st.info("Movement data not available")
         
         with col2:
-            # Use the new manual report function instead of auto-generation
-            display_pitch_development_report_section(selected_player)
+            # Pass the current session's dev reports directory with fallback to comparison session
+            fallback_dir = comparison_config["dev_reports_dir"] if show_comparison and comparison_config else None
+            
+            # If viewing September, fallback to January; if viewing January, fallback to September
+            if not show_comparison:
+                # Viewing September - fallback to January if available
+                fallback_dir = SESSION_CONFIG["January 2026"]["dev_reports_dir"]
+            
+            display_pitch_development_report_section(selected_player, current_config["dev_reports_dir"], fallback_dir)
         
         # Stuff+ Summary Table
         st.markdown('<h3 class="section-header">Bonnies Stuff+ Summary</h3>', unsafe_allow_html=True)
@@ -2388,14 +3573,35 @@ def main():
             }
         )
 
-        display_player_force_plate_section(selected_player)
+        # Get player profile ID if not already loaded
+        if 'vald_profiles' not in st.session_state or not st.session_state.vald_profiles:
+            st.session_state.vald_profiles = fetch_all_vald_profiles()
+
+        player_profile_id = find_player_vald_profile_id(selected_player, st.session_state.vald_profiles)
+
+
+        # Force plate section with session comparison support
+        if show_comparison:
+            display_player_force_plate_section(selected_player, selected_session, comparison_session="September 2025")
+        else:
+            display_player_force_plate_section(selected_player, selected_session)
+
+        # Display rotational analysis section
+        display_player_rotational_analysis(selected_player, player_profile_id)
 
         # Add biomechanics section
         st.markdown('<h3 class="section-header">Biomechanical Analysis</h3>', unsafe_allow_html=True)
-        biomechanics_display(selected_player)
+        biomechanics_display(selected_player, current_config["biomech_dir"])
 
-        # Add player-specific assessment data
-        display_player_assessment_data(selected_player)
+        # Add player-specific assessment data with comparison if viewing January
+        if show_comparison:
+            display_player_assessment_data(
+                selected_player, 
+                current_config["assessment_file"],
+                comparison_file=comparison_config["assessment_file"]
+            )
+        else:
+            display_player_assessment_data(selected_player, current_config["assessment_file"])
 
     # Footer
     st.markdown("---")
