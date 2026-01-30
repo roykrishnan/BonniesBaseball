@@ -9,6 +9,18 @@ import os
 import glob
 import requests 
 
+# Session configuration
+SESSION_CONFIG = {
+    "September 2025": {
+        "bullpen_dir": "data/BullpenData090625",
+        "date_code": "090625"
+    },
+    "January 2026": {
+        "bullpen_dir": "data/BullpenData011826",
+        "date_code": "011826"
+    }
+}
+
 # Set matplotlib style for dark mode
 plt.style.use('dark_background')
 sns.set_style("darkgrid")
@@ -149,10 +161,158 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+def calculate_bonnies_stuff_plus_for_pitch_type(df, pitch_type):
+    """Calculate Bonnies Stuff+ for a specific pitch type
+    
+    Includes penalty for pitches with similar H-break and V-break values,
+    as distinctive movement profiles (dominant in one direction) are generally
+    more effective than diagonal movement.
+    """
+    
+    def normalize_component(values, higher_is_better=True):
+        if len(values) == 0 or values.std() == 0:
+            return np.ones(len(values)) * 0.5
+        
+        # Use z-score normalization (more industry standard)
+        z_scores = (values - values.mean()) / values.std()
+        
+        # Convert to 0-1 scale with sigmoid function
+        normalized = 1 / (1 + np.exp(-z_scores))
+        
+        if not higher_is_better:
+            normalized = 1 - normalized
+        return normalized
+    
+    def normalize_deviation_from_mean(values):
+        """Reward deviation from mean - both high and low values are good"""
+        if len(values) == 0 or values.std() == 0:
+            return np.ones(len(values)) * 0.5
+        
+        # Calculate absolute deviation from mean
+        mean_val = values.mean()
+        deviations = np.abs(values - mean_val)
+        
+        # Normalize deviations (higher deviation = better)
+        if deviations.std() == 0:
+            return np.ones(len(values)) * 0.5
+            
+        z_scores = (deviations - deviations.mean()) / deviations.std()
+        normalized = 1 / (1 + np.exp(-z_scores))
+        
+        return normalized
+    
+    # Updated weights - includes movement distinction penalty
+    weights = {
+        'velocity': 0.20,          # 20%
+        'spin_rate': 0.15,         # 15%
+        'release_height': 0.10,    # 10%
+        'release_side': 0.08,      # 8%
+        'horizontal_angle': 0.05,  # 5%
+        'speed_diff': 0.07,        # 7%
+        'horizontal_break': 0.10,  # 10%
+        'vertical_break': 0.10,    # 10%
+        'distinctive_shape': 0.15, # 15%
+        'movement_distinction': 0.10  # 10% NEW - penalizes similar H/V break
+    }
+    
+    # Get column names for this pitch type
+    velocity_col = f'{pitch_type}_Velocity'
+    spin_col = f'{pitch_type}_SpinRate'
+    height_col = f'{pitch_type}_ReleaseHeight'
+    side_col = f'{pitch_type}_ReleaseSide'
+    angle_col = f'{pitch_type}_HorizontalAngle'
+    speed_diff_col = f'{pitch_type}_SpeedDiff'
+    h_break_col = f'{pitch_type}_HorizontalBreak'
+    v_break_col = f'{pitch_type}_VerticalBreak'
+    
+    # Calculate normalized components
+    velocity_norm = normalize_component(df[velocity_col], higher_is_better=True)
+    spin_norm = normalize_component(df[spin_col], higher_is_better=True)
+    speed_diff_norm = normalize_component(df[speed_diff_col], higher_is_better=True)
+    horizontal_angle_norm = normalize_component(abs(df[angle_col]), higher_is_better=False)
+    h_break_norm = normalize_component(df[h_break_col], higher_is_better=True)
+    v_break_norm = normalize_component(abs(df[v_break_col]), higher_is_better=True)
+    
+    # New components that reward deviation from mean
+    height_norm = normalize_deviation_from_mean(df[height_col])
+    
+    # Handle release side if it exists, otherwise use zeros
+    if side_col in df.columns:
+        side_norm = normalize_deviation_from_mean(df[side_col])
+    else:
+        side_norm = np.ones(len(df)) * 0.5  # Neutral score if no data
+    
+    # Distinctive shape: reward pitches where |horizontal_break| - |vertical_break| deviates from 0
+    shape_differential = np.abs(df[h_break_col]) - np.abs(df[v_break_col])
+    distinctive_shape_norm = normalize_deviation_from_mean(np.abs(shape_differential))
+    
+    # NEW: Movement distinction score - PENALIZES similar H and V break values
+    # When H-break and V-break are very similar, the pitch has "diagonal" movement
+    # which is generally less effective than movement dominant in one axis
+    h_break_vals = df[h_break_col].values
+    v_break_vals = np.abs(df[v_break_col].values)
+    
+    movement_distinction_scores = []
+    for h_break, v_break_abs in zip(h_break_vals, v_break_vals):
+        total_movement = h_break + v_break_abs
+        
+        if total_movement > 5:  # Only apply penalty if there's meaningful movement
+            min_break = min(h_break, v_break_abs)
+            max_break = max(h_break, v_break_abs)
+            
+            if max_break > 0:
+                similarity_ratio = min_break / max_break  # 0 to 1, where 1 = identical
+                
+                # Movement magnitude factor
+                movement_magnitude_factor = min(1.0, total_movement / 30)
+                
+                # Base distinction score: high when breaks are DIFFERENT, low when SIMILAR
+                base_distinction_score = 1.0 - similarity_ratio
+                
+                # Apply magnitude scaling
+                score = base_distinction_score * (0.5 + 0.5 * (1 - movement_magnitude_factor * similarity_ratio))
+                score = max(0.0, min(1.0, score))
+            else:
+                score = 0.5
+        else:
+            score = 0.5  # Neutral for low movement
+        
+        movement_distinction_scores.append(score)
+    
+    movement_distinction_norm = np.array(movement_distinction_scores)
+    
+    # Calculate weighted composite score
+    composite_score = (
+        velocity_norm * weights['velocity'] +
+        spin_norm * weights['spin_rate'] +
+        height_norm * weights['release_height'] +
+        side_norm * weights['release_side'] +
+        horizontal_angle_norm * weights['horizontal_angle'] +
+        speed_diff_norm * weights['speed_diff'] +
+        h_break_norm * weights['horizontal_break'] +
+        v_break_norm * weights['vertical_break'] +
+        distinctive_shape_norm * weights['distinctive_shape'] +
+        movement_distinction_norm * weights['movement_distinction']
+    )
+    
+    # Convert to industry-standard scale
+    median_score = np.median(composite_score)
+    std_score = np.std(composite_score)
+    
+    # Scale to Stuff+ where median = 100, std = 20
+    if std_score > 0:
+        stuff_plus = 100 + ((composite_score - median_score) / std_score) * 20
+    else:
+        stuff_plus = np.ones(len(composite_score)) * 100
+    
+    # Cap at reasonable bounds
+    stuff_plus = np.clip(stuff_plus, 40, 160)
+    
+    return stuff_plus
+
 @st.cache_data
-def load_rapsodo_data():
-    """Load Rapsodo pitching data from CSV files in data directory"""
-    data_dir = "data"
+def load_rapsodo_data(data_dir):
+    """Load Rapsodo pitching data from CSV files in specified directory"""
     all_player_data = []
     
     if not os.path.exists(data_dir):
@@ -316,110 +476,6 @@ def load_rapsodo_data():
     
     return df
 
-def calculate_bonnies_stuff_plus_for_pitch_type(df, pitch_type):
-    """Calculate Bonnies Stuff+ for a specific pitch type"""
-    
-    def normalize_component(values, higher_is_better=True):
-        if len(values) == 0 or values.std() == 0:
-            return np.ones(len(values)) * 0.5
-        
-        # Use z-score normalization (more industry standard)
-        z_scores = (values - values.mean()) / values.std()
-        
-        # Convert to 0-1 scale with sigmoid function
-        normalized = 1 / (1 + np.exp(-z_scores))
-        
-        if not higher_is_better:
-            normalized = 1 - normalized
-        return normalized
-    
-    def normalize_deviation_from_mean(values):
-        """Reward deviation from mean - both high and low values are good"""
-        if len(values) == 0 or values.std() == 0:
-            return np.ones(len(values)) * 0.5
-        
-        # Calculate absolute deviation from mean
-        mean_val = values.mean()
-        deviations = np.abs(values - mean_val)
-        
-        # Normalize deviations (higher deviation = better)
-        if deviations.std() == 0:
-            return np.ones(len(values)) * 0.5
-            
-        z_scores = (deviations - deviations.mean()) / deviations.std()
-        normalized = 1 / (1 + np.exp(-z_scores))
-        
-        return normalized
-    
-    # Updated weights based on your specifications
-    weights = {
-        'velocity': 0.225,         # 22.5%
-        'spin_rate': 0.175,        # 17.5%  
-        'release_height': 0.125,   # 12.5%
-        'release_side': 0.085,     # 8.5%
-        'horizontal_angle': 0.05,  # 5%
-        'speed_diff': 0.075,       # Reduced from 0.10 to 0.075 (7.5%)
-        'horizontal_break': 0.10,  # 10%
-        'vertical_break': 0.10,    # 10%
-        'distinctive_shape': 0.125 # Increased from 0.10 to 0.125 (12.5%)
-    }
-    
-    # Get column names for this pitch type
-    velocity_col = f'{pitch_type}_Velocity'
-    spin_col = f'{pitch_type}_SpinRate'
-    height_col = f'{pitch_type}_ReleaseHeight'
-    side_col = f'{pitch_type}_ReleaseSide'
-    angle_col = f'{pitch_type}_HorizontalAngle'
-    speed_diff_col = f'{pitch_type}_SpeedDiff'
-    h_break_col = f'{pitch_type}_HorizontalBreak'
-    v_break_col = f'{pitch_type}_VerticalBreak'
-    
-    # Calculate normalized components
-    velocity_norm = normalize_component(df[velocity_col], higher_is_better=True)
-    spin_norm = normalize_component(df[spin_col], higher_is_better=True)
-    speed_diff_norm = normalize_component(df[speed_diff_col], higher_is_better=True)
-    horizontal_angle_norm = normalize_component(abs(df[angle_col]), higher_is_better=False)
-    h_break_norm = normalize_component(df[h_break_col], higher_is_better=True)
-    v_break_norm = normalize_component(df[v_break_col], higher_is_better=True)
-    
-    # New components that reward deviation from mean
-    height_norm = normalize_deviation_from_mean(df[height_col])
-    
-    # Handle release side if it exists, otherwise use zeros
-    if side_col in df.columns:
-        side_norm = normalize_deviation_from_mean(df[side_col])
-    else:
-        side_norm = np.ones(len(df)) * 0.5  # Neutral score if no data
-    
-    # Distinctive shape: reward pitches where |horizontal_break| - |vertical_break| deviates from 0
-    shape_differential = np.abs(df[h_break_col]) - np.abs(df[v_break_col])
-    distinctive_shape_norm = normalize_deviation_from_mean(np.abs(shape_differential))
-    
-    # Calculate weighted composite score
-    composite_score = (
-        velocity_norm * weights['velocity'] +
-        spin_norm * weights['spin_rate'] +
-        height_norm * weights['release_height'] +
-        side_norm * weights['release_side'] +
-        horizontal_angle_norm * weights['horizontal_angle'] +
-        speed_diff_norm * weights['speed_diff'] +
-        h_break_norm * weights['horizontal_break'] +
-        v_break_norm * weights['vertical_break'] +
-        distinctive_shape_norm * weights['distinctive_shape']
-    )
-    
-    # Convert to industry-standard scale
-    median_score = np.median(composite_score)
-    std_score = np.std(composite_score)
-    
-    # Scale to Stuff+ where median = 100, std = 20
-    stuff_plus = 100 + ((composite_score - median_score) / std_score) * 20
-    
-    # Cap at reasonable bounds
-    stuff_plus = np.clip(stuff_plus, 40, 160)
-    
-    return stuff_plus
-
 def create_leaderboard_chart(df, metric_col, title):
     """Create a horizontal bar chart for leaderboards using matplotlib dark mode"""
     df_sorted = df.sort_values(metric_col, ascending=False).head(10)  # Get top 10 performers
@@ -527,6 +583,46 @@ def create_leaderboard_table(df, metric_col, additional_cols=None):
         for col in additional_cols:
             if col in df_sorted.columns:
                 display_cols.append(col)
+    
+    return df_sorted[display_cols]
+
+def create_leaderboard_table_with_rank_change(current_df, baseline_df, metric_col, additional_cols=None):
+    """Create a formatted leaderboard table with rank change from baseline"""
+    # Sort current data
+    df_sorted = current_df.sort_values(metric_col, ascending=False).reset_index(drop=True)
+    df_sorted['Rank'] = range(1, len(df_sorted) + 1)
+    
+    # Calculate baseline ranks if available
+    if baseline_df is not None and not baseline_df.empty and metric_col in baseline_df.columns:
+        baseline_sorted = baseline_df.sort_values(metric_col, ascending=False).reset_index(drop=True)
+        baseline_sorted['BaselineRank'] = range(1, len(baseline_sorted) + 1)
+        baseline_ranks = baseline_sorted.set_index('PlayerName')['BaselineRank'].to_dict()
+        
+        # Calculate rank change (positive = moved up, negative = moved down)
+        df_sorted['Rank Change'] = df_sorted.apply(
+            lambda row: baseline_ranks.get(row['PlayerName'], None) - row['Rank'] 
+            if row['PlayerName'] in baseline_ranks else None, axis=1
+        )
+        
+        # Also get baseline Stuff+ values for comparison
+        baseline_values = baseline_sorted.set_index('PlayerName')[metric_col].to_dict()
+        df_sorted['Baseline'] = df_sorted['PlayerName'].map(baseline_values)
+        df_sorted['Stuff+ Change'] = df_sorted[metric_col] - df_sorted['Baseline']
+    else:
+        df_sorted['Rank Change'] = None
+        df_sorted['Baseline'] = None
+        df_sorted['Stuff+ Change'] = None
+    
+    # Select columns for display
+    display_cols = ['Rank', 'PlayerName', metric_col]
+    if additional_cols:
+        for col in additional_cols:
+            if col in df_sorted.columns:
+                display_cols.append(col)
+    
+    # Add comparison columns if they exist
+    if df_sorted['Baseline'].notna().any():
+        display_cols.extend(['Stuff+ Change', 'Rank Change'])
     
     return df_sorted[display_cols]
 
@@ -643,18 +739,25 @@ def load_individual_pitch_data():
 st.markdown('<h1 class="main-header">St. Bonaventure Baseball</h1>', unsafe_allow_html=True)
 st.markdown('<p class="sub-header">Bonnies Stuff+ Dashboard</p>', unsafe_allow_html=True)
 
-# Load data
 try:
-    rapsodo_df = load_rapsodo_data()
+    # Load January 2026 (current) data
+    current_config = SESSION_CONFIG["January 2026"]
+    rapsodo_df = load_rapsodo_data(current_config["bullpen_dir"])
+    
+    # Load September 2025 (baseline) data for comparison
+    baseline_config = SESSION_CONFIG["September 2025"]
+    try:
+        baseline_df = load_rapsodo_data(baseline_config["bullpen_dir"])
+    except Exception:
+        baseline_df = None
+        
 except Exception as e:
     st.error(f"Failed to load data: {str(e)}")
     st.stop()
 
-# Check if we have data
-if rapsodo_df.empty:
-    st.error("No Rapsodo data loaded. Please check your data directory and CSV files.")
-    st.info("Expected data directory: './data/' with CSV files containing Rapsodo pitch data.")
-    st.stop()
+# Show comparison indicator
+if baseline_df is not None and not baseline_df.empty:
+    st.info("Showing January 2026 data with rank changes vs September 2025 baseline")
 
 # Sidebar with logo
 try:
@@ -710,6 +813,10 @@ if stuff_plus_col not in rapsodo_df.columns:
 
 # Filter out players without data for this pitch type
 display_df = rapsodo_df[rapsodo_df[stuff_plus_col].notna()].copy()
+# Filter baseline data similarly
+baseline_display_df = None
+if baseline_df is not None and stuff_plus_col in baseline_df.columns:
+    baseline_display_df = baseline_df[baseline_df[stuff_plus_col].notna()].copy()
 
 if len(display_df) == 0:
     st.error(f"No players have data for {display_name}")
@@ -725,42 +832,104 @@ with col1:
     st.pyplot(fig_stuff, use_container_width=True)
 
 with col2:
-    st.subheader(f"Top Performers - {selected_pitch_type}")
+    st.subheader("Biggest Movers vs September")
     
-    # Get relevant columns for this pitch type
-    if selected_pitch_type == "Total":
-        additional_cols = ['TotalPitches']
+    # Only show if we have baseline data
+    if baseline_display_df is not None and not baseline_display_df.empty:
+        # Create movers table using rank change function
+        movers_table = create_leaderboard_table_with_rank_change(
+            display_df, baseline_display_df, stuff_plus_col, []
+        )
+        
+        # Filter to only players with comparison data
+        movers_table = movers_table[movers_table['Stuff+ Change'].notna()].copy()
+        
+        if not movers_table.empty:
+            # Sort by absolute change to get biggest movers
+            movers_table['Abs Change'] = movers_table['Stuff+ Change'].abs()
+            movers_table = movers_table.sort_values('Abs Change', ascending=False)
+            
+            # Format the display columns
+            def format_stuff_change(val):
+                if pd.isna(val) or val is None:
+                    return ""
+                return f"{val:+.1f}"
+            
+            def format_rank_change(val):
+                if pd.isna(val) or val is None:
+                    return ""
+                val = int(round(val))
+                if val > 0:
+                    return f"↑{val}"
+                elif val < 0:
+                    return f"↓{abs(val)}"
+                else:
+                    return "—"
+            
+            # Create display dataframe
+            display_movers = movers_table[['PlayerName', stuff_plus_col, 'Stuff+ Change', 'Rank Change']].copy()
+            display_movers.columns = ['Player', 'Current', 'Stuff+ Δ', 'Rank Δ']
+            
+            # Format the columns
+            display_movers['Stuff+ Δ'] = movers_table['Stuff+ Change'].apply(format_stuff_change)
+            display_movers['Rank Δ'] = movers_table['Rank Change'].apply(format_rank_change)
+            display_movers['Current'] = display_movers['Current'].round(1)
+            
+            # Color styling function
+            def color_movers(val):
+                if pd.isna(val) or val is None or val == "":
+                    return ''
+                if isinstance(val, str):
+                    # Check for positive/negative indicators
+                    if val.startswith('+') or val.startswith('↑'):
+                        return 'color: #00cc00; font-weight: bold'
+                    elif val.startswith('-') or val.startswith('↓'):
+                        return 'color: #ff4444; font-weight: bold'
+                return ''
+            
+            # Apply styling
+            styled_movers = display_movers.head(10).style.map(
+                color_movers, subset=['Stuff+ Δ', 'Rank Δ']
+            )
+            
+            st.dataframe(
+                styled_movers,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Player": st.column_config.TextColumn("Player"),
+                    "Current": st.column_config.NumberColumn("Current Stuff+", format="%.1f"),
+                    "Stuff+ Δ": st.column_config.TextColumn("Stuff+ Δ"),
+                    "Rank Δ": st.column_config.TextColumn("Rank Δ")
+                }
+            )
+            
+            # Quick summary metrics
+            gainers = movers_table[movers_table['Stuff+ Change'] > 0]
+            losers = movers_table[movers_table['Stuff+ Change'] < 0]
+            
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if not gainers.empty:
+                    top_gainer = gainers.iloc[0]
+                    st.metric(
+                        "Biggest Gainer", 
+                        top_gainer['PlayerName'].split()[0],
+                        f"+{top_gainer['Stuff+ Change']:.1f}"
+                    )
+            with col_b:
+                if not losers.empty:
+                    top_loser = losers.iloc[-1] if losers['Stuff+ Change'].iloc[0] > losers['Stuff+ Change'].iloc[-1] else losers.iloc[0]
+                    top_loser = movers_table[movers_table['Stuff+ Change'] < 0].sort_values('Stuff+ Change').iloc[0]
+                    st.metric(
+                        "Biggest Drop",
+                        top_loser['PlayerName'].split()[0],
+                        f"{top_loser['Stuff+ Change']:.1f}"
+                    )
+        else:
+            st.info("No players with comparison data available")
     else:
-        additional_cols = [
-            f'{selected_pitch_type}_Velocity',
-            f'{selected_pitch_type}_SpinRate',
-            f'{selected_pitch_type}_Pitches'
-        ]
-    
-    stuff_table = create_leaderboard_table(
-        display_df, stuff_plus_col, additional_cols
-    )
-    
-    # Configure columns dynamically
-    column_config = {
-        stuff_plus_col: st.column_config.NumberColumn(display_name, format="%.1f")
-    }
-    
-    if selected_pitch_type != "Total":
-        column_config.update({
-            f"{selected_pitch_type}_Velocity": st.column_config.NumberColumn("Velocity", format="%.1f mph"),
-            f"{selected_pitch_type}_SpinRate": st.column_config.NumberColumn("Spin Rate", format="%.0f rpm"),
-            f"{selected_pitch_type}_Pitches": st.column_config.NumberColumn("Pitches", format="%.0f")
-        })
-    else:
-        column_config["TotalPitches"] = st.column_config.NumberColumn("Total Pitches", format="%.0f")
-    
-    st.dataframe(
-        stuff_table.head(10), 
-        hide_index=True, 
-        use_container_width=True,
-        column_config=column_config
-    )
+        st.info("No September baseline data available for comparison")
 
 # Full leaderboard
 if selected_pitch_type == "Total":
@@ -784,7 +953,7 @@ else:
         f'{selected_pitch_type}_Pitches'
     ]
 
-full_table = create_leaderboard_table(display_df, stuff_plus_col, full_table_cols)
+full_table = create_leaderboard_table_with_rank_change(display_df, baseline_display_df, stuff_plus_col, full_table_cols)
 
 # Configure columns for full table
 full_column_config = {
@@ -809,12 +978,56 @@ else:
         f"{selected_pitch_type}_Pitches": st.column_config.NumberColumn("Pitches", format="%.0f")
     })
 
-st.dataframe(
-    full_table, 
-    hide_index=True, 
-    use_container_width=True,
-    column_config=full_column_config
-)
+# Add comparison column configs
+if 'Stuff+ Change' in full_table.columns:
+    full_column_config["Stuff+ Change"] = st.column_config.NumberColumn("Stuff+ Δ", format="%+.1f")
+
+# Format Rank Change with arrows
+if 'Rank Change' in full_table.columns:
+    # Create a formatted rank change column with arrows
+    def format_rank_change(val):
+        if pd.isna(val) or val is None:
+            return ""
+        val = int(round(val))
+        if val > 0:
+            return f"↑{val}"
+        elif val < 0:
+            return f"↓{abs(val)}"
+        else:
+            return "→0"
+    
+    full_table['Rank Change'] = full_table['Rank Change'].apply(format_rank_change)
+    full_column_config["Rank Change"] = st.column_config.TextColumn("Rank Δ")
+
+# Apply styling and display
+full_style_columns = [col for col in ['Stuff+ Change'] if col in full_table.columns]
+
+# Update color function to also handle the text-based rank change
+def color_change_with_rank(val):
+    if pd.isna(val) or val is None or val == "":
+        return ''
+    # Handle numeric Stuff+ Change
+    if isinstance(val, (int, float)):
+        if val > 0:
+            return 'color: #00cc00'
+        elif val < 0:
+            return 'color: #ff4444'
+    # Handle text-based Rank Change with arrows
+    elif isinstance(val, str):
+        if val.startswith('↑'):
+            return 'color: #00cc00'
+        elif val.startswith('↓'):
+            return 'color: #ff4444'
+    return ''
+
+# Include Rank Change in styling columns
+style_columns_all = [col for col in ['Stuff+ Change', 'Rank Change'] if col in full_table.columns]
+
+if style_columns_all:
+    styled_full_table = full_table.style.map(color_change_with_rank, subset=style_columns_all)
+    st.dataframe(styled_full_table, hide_index=True, use_container_width=True, column_config=full_column_config)
+else:
+    st.dataframe(full_table, hide_index=True, use_container_width=True, column_config=full_column_config)
 
 # Right vs Left Handed Analysis
 st.subheader(f"{display_name} - Right vs Left Handed Pitchers")
@@ -1552,8 +1765,8 @@ def main():
     
     # Date selection
     selected_date = st.date_input(
-        "Select Testing Date (First Test 2025/09/06)",
-        value=date(2025, 9, 6),
+        "Select Testing Date",
+        value=date(2026, 1, 18),
         min_value=date(2024, 1, 1),
         max_value=date.today()
     )
@@ -1602,7 +1815,7 @@ if __name__ == "__main__":
 
 st.header("Table Assessments - Team View")
 st.markdown('<p class="sub-header">Bonnies Baseball Assessment Table by Player</p>', unsafe_allow_html=True)
-excel_file_path = os.path.join("data", "BonniesBaseballTableAssessment.xlsx")
+excel_file_path = os.path.join("data", "BonniesBaseballTableAssessmentS2.xlsx")
 
 try:
     # Read the Excel file
