@@ -2672,7 +2672,7 @@ def display_arm_care_analysis(dynamo_perf_df, player_name, team_dynamo_df=None):
             Research on isometric handheld dynamometry in baseball players shows:
             - Professional pitcher throwing arm average: ~0.75-0.83
             - Non-throwing arm average: ~0.99
-            - Ratios <0.70 may indicate increased injury risk
+            - Ratios at or under 0.75 or over 1.3 may indicate increased injury risk
             - Ratios near 1.0 suggest balanced strength
             """)
             
@@ -2785,12 +2785,14 @@ def create_er_ir_comparison_chart(er_value, ir_value, ratio, player_name,
                 color='#32CD32', fontsize=10, fontweight='bold')
     
     # Add reference labels at top
-    ax2.text(0.70, 0.55, 'Injury Risk\nThreshold\n(0.70)', ha='center', va='bottom', 
-            color='#FFD700', fontsize=9, fontweight='bold')
+    ax2.text(0.70, 0.55, 'Injury Risk\nThreshold (ER) \n(0.70)', ha='center', va='bottom', 
+            color="#FF0000", fontsize=9, fontweight='bold')
     ax2.text(0.83, 0.55, 'Pro Pitcher\nAvg\n(0.83)', ha='center', va='bottom', 
             color='#00CED1', fontsize=9, fontweight='bold')
     ax2.text(1.0, 0.55, 'Balanced\n(1.0)', ha='center', va='bottom', 
             color='white', fontsize=9, alpha=0.7)
+    ax2.text(1.3, 0.55, 'Injury Risk\nThreshold (IR) \n(0.70)', ha='center', va='bottom', 
+            color="#FF0000", fontsize=9, fontweight='bold')
     
     # Add ratio value label
     label_x = min(ratio + 0.04, 1.25)
