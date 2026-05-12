@@ -7,7 +7,8 @@ import numpy as np
 from datetime import datetime, date, timedelta
 import os
 import glob
-import requests 
+import time
+import requests
 
 # Session configuration
 SESSION_CONFIG = {
@@ -1106,17 +1107,65 @@ sns.set_palette("husl")
 # VALD API Configuration
 VALD_CONFIG = st.secrets["VALD_CONFIG"]
 
-@st.cache_data(ttl=300)
+# Module-level token cache: persists across Streamlit reruns within one process.
+# Stores the access token and an absolute unix-epoch expiry derived from
+# the `expires_in` returned by VALD's identity server.
+_vald_token_cache = {"token": None, "expires_at": 0.0}
+
 def get_access_token():
-    """Get access token from VALD API"""
+    """Get (or reuse) an access token from VALD's identity server.
+
+    Caches until 60s before the server-provided expiry. Handles 401, 429,
+    and OAuth `invalid_client` errors explicitly so callers see a useful
+    message instead of a silent None.
+    """
+    now = time.time()
+    if _vald_token_cache["token"] and now < _vald_token_cache["expires_at"] - 60:
+        return _vald_token_cache["token"]
+
     token_data = {
         "grant_type": "client_credentials",
         "client_id": VALD_CONFIG["client_id"],
-        "client_secret": VALD_CONFIG["client_secret"]
+        "client_secret": VALD_CONFIG["client_secret"],
+        "audience": "vald-api-external"
     }
-    
-    response = requests.post(VALD_CONFIG["token_url"], data=token_data)
-    return response.json()["access_token"] if response.ok else None
+
+    try:
+        response = requests.post(VALD_CONFIG["token_url"], data=token_data, timeout=15)
+    except requests.RequestException as e:
+        st.error(f"VALD token request failed: {e}")
+        return None
+
+    if response.status_code == 429:
+        retry_after = response.headers.get("Retry-After", "unknown")
+        st.error(f"VALD rate limit hit (429 Too Many Requests). Retry after {retry_after}s.")
+        return None
+
+    if response.status_code == 401:
+        st.error("VALD auth failed (401 Unauthorized): credentials rejected.")
+        return None
+
+    if not response.ok:
+        try:
+            err = response.json()
+        except ValueError:
+            err = {}
+        if err.get("error") == "invalid_client":
+            st.error("VALD auth failed: invalid_client — check client_id/client_secret.")
+        else:
+            st.error(f"VALD token error: HTTP {response.status_code} {err.get('error', '')}".strip())
+        return None
+
+    data = response.json()
+    token = data.get("access_token")
+    if not token:
+        st.error("VALD token response missing access_token.")
+        return None
+
+    expires_in = data.get("expires_in", 3600)
+    _vald_token_cache["token"] = token
+    _vald_token_cache["expires_at"] = now + float(expires_in)
+    return token
 
 @st.cache_data(ttl=1800)
 def load_bonnies_players_from_csv():
